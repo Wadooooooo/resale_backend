@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 from . import crud, schemas, models
 from .database import get_db
 
+
 # --- Настройки безопасности ---
 
 # Генерируйте этот ключ командой: openssl rand -hex 32
