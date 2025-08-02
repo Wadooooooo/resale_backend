@@ -1,0 +1,1803 @@
+# app/main.py 
+
+from . import security
+
+from sqlalchemy import text
+from datetime import timedelta, date, datetime
+from typing import List, Optional
+from pydantic import BaseModel
+from decimal import Decimal
+
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload, selectinload
+from sqlalchemy import select
+from .models import format_enum_value_for_display
+
+# Удалить этот импорт, так как используется AsyncSession
+# from sqlalchemy.orm import Session 
+
+from . import crud, schemas, security, models
+from .database import get_db
+from fastapi.middleware.cors import CORSMiddleware
+# Следующие импорты больше не нужны, если FastAPI не отдает статику
+# from fastapi.staticfiles import StaticFiles
+# from starlette.responses import HTMLResponse
+
+
+app = FastAPI(title="resale shop API")
+
+# --- Эндпоинты для Инспекции ---
+
+
+@app.get("/api/v1/model-numbers/search", response_model=List[schemas.ModelNumber], tags=["Inspections"], dependencies=[Depends(security.require_permission("perform_inspections"))])
+async def search_for_model_numbers(
+    q: str, # Параметр запроса, например /search?q=ABC
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Ищет номера моделей для автодополнения."""
+    return await crud.search_model_numbers(db=db, query=q)
+
+
+@app.get("/api/v1/phones/for-inspection", response_model=List[schemas.Phone], tags=["Inspections"])
+async def read_phones_for_inspection(db: AsyncSession = Depends(get_db)):
+    phones = await crud.get_phones_for_inspection(db=db)
+    return [_format_phone_response(p) for p in phones]
+
+
+
+@app.get("/api/v1/checklist-items", response_model=List[schemas.ChecklistItem], tags=["Inspections"], dependencies=[Depends(security.require_permission("perform_inspections"))])
+async def read_checklist_items(
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Получает список всех пунктов чек-листа."""
+    checklist_items = await crud.get_checklist_items(db=db)
+
+    return await crud.get_checklist_items(db=db)
+
+@app.post("/api/v1/phones/{phone_id}/initial-inspections", response_model=schemas.Phone, tags=["Inspections"], dependencies=[Depends(security.require_permission("perform_inspections"))])
+async def create_initial_inspection_endpoint(
+    phone_id: int,
+    inspection_data: schemas.InspectionSubmission,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    updated_phone = await crud.create_initial_inspection(db=db, phone_id=phone_id, inspection_data=inspection_data, user_id=current_user.id)
+    return _format_phone_response(updated_phone)
+
+
+@app.put("/api/v1/inspections/{inspection_id}/battery-test", response_model=schemas.Phone, tags=["Inspections"], dependencies=[Depends(security.require_permission("perform_inspections"))])
+async def add_battery_test_endpoint(
+    inspection_id: int,
+    battery_data: schemas.BatteryTestCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Добавляет результаты теста аккумулятора к существующей инспекции."""
+    updated_phone = await crud.add_battery_test_results(
+        db=db, 
+        inspection_id=inspection_id, 
+        battery_data=battery_data, 
+        user_id=current_user.id
+    )
+
+    # Используем __dict__ для получения всех атрибутов
+    phone_dict = updated_phone.__dict__.copy()
+
+    # Преобразуем Enum в строку
+    if updated_phone.technical_status:
+        phone_dict["technical_status"] = updated_phone.technical_status.value
+    if updated_phone.commercial_status:
+        phone_dict["commercial_status"] = updated_phone.commercial_status.value
+
+    if updated_phone.model:
+        model_name_base = updated_phone.model.model_name.name if updated_phone.model.model_name else ""
+        storage_display = models.format_storage_for_display(updated_phone.model.storage.storage) if updated_phone.model.storage else ""
+        color_name = updated_phone.model.color.color_name if updated_phone.model.color else ""
+        full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+        
+        phone_dict['model'] = schemas.ModelDetail(
+            id=updated_phone.model.id,
+            name=full_display_name,
+            base_name=model_name_base,
+            model_name_id=updated_phone.model.model_name_id,
+            storage_id=updated_phone.model.storage_id,
+            color_id=updated_phone.model.color_id
+        )
+        
+    return schemas.Phone.model_validate(phone_dict, from_attributes=True)
+
+
+# Эндпоинт для получения списка телефонов, ожидающих тест аккумулятора
+@app.get("/api/v1/phones/for-battery-test", response_model=List[schemas.InspectionInfo], tags=["Inspections"])
+async def read_phones_for_battery_test(db: AsyncSession = Depends(get_db)):
+    inspections = await crud.get_phones_for_battery_test(db=db)
+    
+    response_list = []
+    for inspection in inspections:
+        if inspection.phone:
+            formatted_phone = _format_phone_response(inspection.phone)
+            inspection_info = schemas.InspectionInfo(
+                id=inspection.id,
+                phone=formatted_phone
+            )
+            response_list.append(inspection_info)
+            
+    return response_list
+
+# --- Новые эндпоинты для получения списка моделей и аксессуаров по названию ---
+@app.get("/api/v1/models_for_orders", response_model=List[schemas.ModelName], tags=["Models"])
+async def read_models_for_orders(
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """Получает список моделей (для выпадающих списков в заказах)."""
+    models_data = await crud.get_models_by_name(db=db)
+    # Форматируем, чтобы вернуть только id и name, а не всю модель
+    return [schemas.ModelName(id=m.id, name=m.model_name.name if m.model_name else None) for m in models_data]
+
+@app.get("/api/v1/accessories_for_orders", response_model=List[schemas.Accessory], tags=["Accessories"])
+async def read_accessories_for_orders(
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """Получает список аксессуаров (для выпадающих списков в заказах)."""
+    accessories_data = await crud.get_accessories_by_name(db=db)
+    return [schemas.Accessory.model_validate(a) for a in accessories_data]
+
+
+origins = [
+    "http://localhost:5173", # Адрес вашего React-приложения
+    # Можно добавить и другие адреса, если понадобится
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+def _format_phone_response(phone: models.Phones) -> schemas.Phone:
+    """Централизованная функция для преобразования ORM-объекта Phone в Pydantic-схему."""
+    model_detail = None
+    if phone.model:
+        model_name_base = phone.model.model_name.name if phone.model.model_name else ""
+        storage_display = models.format_storage_for_display(phone.model.storage.storage) if phone.model.storage else ""
+        color_name = phone.model.color.color_name if phone.model.color else ""
+        full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+        
+        model_detail = schemas.ModelDetail(
+            id=phone.model.id,
+            name=full_display_name,
+            base_name=model_name_base,
+            model_name_id=phone.model.model_name_id,
+            storage_id=phone.model.storage_id,
+            color_id=phone.model.color_id
+        )
+
+    return schemas.Phone(
+        id=phone.id,
+        serial_number=phone.serial_number,
+        technical_status=phone.technical_status.value if phone.technical_status else None,
+        commercial_status=phone.commercial_status.value if phone.commercial_status else None,
+        added_date=phone.added_date,
+        model=model_detail,
+        model_number=phone.model_number
+    )
+# --- Блок для отдачи статических файлов, который нужно УДАЛИТЬ ---
+# app.mount("/static", StaticFiles(directory="static"), name="static")
+# @app.get("/", response_class=HTMLResponse)
+# async def read_root():
+#     with open("static/index.html", "r", encoding="utf-8") as f:
+#         return f.read()
+# --- Конец блока для удаления ---
+
+# --- Эндпоинты для Движения Денег ---
+
+@app.get("/api/v1/cashflow/categories", response_model=List[schemas.OperationCategory], tags=["Cash Flow"],
+         dependencies=[Depends(security.require_permission("manage_cashflow"))])
+async def read_operation_categories(db: AsyncSession = Depends(get_db), current_user: schemas.User = Depends(security.get_current_active_user)):
+    return await crud.get_operation_categories(db=db)
+
+@app.get("/api/v1/cashflow/counterparties", response_model=List[schemas.Counterparty], tags=["Cash Flow"],
+         dependencies=[Depends(security.require_permission("manage_cashflow"))])
+async def read_counterparties(db: AsyncSession = Depends(get_db), current_user: schemas.User = Depends(security.get_current_active_user)):
+    return await crud.get_counterparties(db=db)
+
+@app.get("/api/v1/cashflow/accounts", response_model=List[schemas.Account], tags=["Cash Flow"],
+         dependencies=[Depends(security.require_any_permission("manage_cashflow", "perform_sales"))])
+async def read_accounts(db: AsyncSession = Depends(get_db), current_user: schemas.User = Depends(security.get_current_active_user)):
+    return await crud.get_accounts(db=db)
+
+@app.post("/api/v1/cashflow", 
+          response_model=schemas.CashFlow, 
+          tags=["Cash Flow"],
+          dependencies=[Depends(security.require_permission("manage_cashflow"))])
+async def create_new_cash_flow(
+    cash_flow_data: schemas.CashFlowCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    return await crud.create_cash_flow(db=db, cash_flow=cash_flow_data, user_id=current_user.id)
+
+@app.get("/api/v1/cashflow", 
+         response_model=List[schemas.CashFlow], 
+         tags=["Cash Flow"],
+         dependencies=[Depends(security.require_permission("manage_cashflow"))])
+async def read_cash_flows(
+    skip: int = 0,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    return await crud.get_cash_flows(db=db, skip=skip, limit=limit)
+
+@app.post("/api/v1/cashflow/accounts", response_model=schemas.Account, tags=["Cash Flow"],
+          dependencies=[Depends(security.require_permission("manage_cashflow"))])
+async def create_new_account(
+    account_data: schemas.AccountCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    return await crud.create_account(db=db, account=account_data)
+
+@app.post("/api/v1/cashflow/counterparties", response_model=schemas.Counterparty, tags=["Cash Flow"],
+          dependencies=[Depends(security.require_permission("manage_cashflow"))])
+async def create_new_counterparty(
+    counterparty_data: schemas.CounterpartyCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    return await crud.create_counterparty(db=db, counterparty=counterparty_data)
+
+@app.get("/api/v1/cashflow/total-balance", response_model=schemas.TotalBalance, tags=["Cash Flow"],
+        dependencies=[Depends(security.require_permission("manage_cashflow"))])
+async def read_total_balance(
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Возвращает общий баланс компании (сумму на всех счетах)."""
+    total = await crud.get_total_balance(db=db)
+    return schemas.TotalBalance(total_balance=total)
+
+@app.get("/api/v1/roles", response_model=List[schemas.RoleInfo], tags=["Users"], dependencies=[Depends(security.require_permission("manage_users"))])
+async def read_roles(db: AsyncSession = Depends(get_db)):
+    """Получает список всех ролей для формы регистрации."""
+    return await crud.get_roles(db=db)
+
+@app.post("/api/v1/users/register-employee", response_model=schemas.User, tags=["Users"], dependencies=[Depends(security.require_permission("manage_users"))])
+async def register_new_employee(
+    employee_data: schemas.EmployeeCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    """Регистрирует нового сотрудника. Доступно только пользователям с правом 'manage_users'."""
+    new_user = await crud.create_user(db=db, user_data=employee_data)
+    
+    # Чтобы ответ соответствовал схеме schemas.User, нужно подгрузить роль с правами
+    await db.refresh(new_user, attribute_names=['role'])
+    
+    user_data_response = {
+        "id": new_user.id, "username": new_user.username, "email": new_user.email,
+        "name": new_user.name, "last_name": new_user.last_name, "active": new_user.active,
+        "role": None
+    }
+    if new_user.role:
+        # Загружаем роль со всеми правами, чтобы вернуть полный объект
+        role_with_permissions_result = await db.execute(
+            select(models.Roles).options(
+                selectinload(models.Roles.role_permissions).selectinload(models.RolePermissions.permission)
+            ).filter(models.Roles.id == new_user.role.id)
+        )
+        role_with_permissions = role_with_permissions_result.scalars().one()
+        permissions_list = [rp.permission for rp in role_with_permissions.role_permissions if rp.permission]
+        user_data_response["role"] = {"role_name": new_user.role.role_name, "permissions": permissions_list}
+
+    return schemas.User.model_validate(user_data_response)
+
+@app.get("/api/v1/users", response_model=List[schemas.User], tags=["Users"], dependencies=[Depends(security.require_permission("manage_users"))])
+async def read_users(db: AsyncSession = Depends(get_db)):
+    """Получает список всех сотрудников."""
+    users = await crud.get_users(db=db)
+    # Форматируем ответ, чтобы он соответствовал схеме, включая роль
+    response_list = []
+    for user in users:
+        user_data = {
+            "id": user.id, "username": user.username, "email": user.email,
+            "name": user.name, "last_name": user.last_name, "active": user.active,
+            "role": None
+        }
+        if user.role:
+            # Для простого списка права не нужны, отдаем только название роли
+            user_data["role"] = {"role_name": user.role.role_name, "permissions": []}
+        response_list.append(schemas.User.model_validate(user_data))
+    return response_list
+
+@app.delete("/api/v1/users/{user_id}", response_model=schemas.User, tags=["Users"], dependencies=[Depends(security.require_permission("manage_users"))])
+async def remove_user(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Удаляет сотрудника по ID."""
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="Вы не можете удалить свою собственную учетную запись.")
+    
+    deleted_user = await crud.delete_user(db=db, user_id=user_id)
+    # Форматируем ответ для удаленного пользователя
+    user_data = {
+        "id": deleted_user.id, "username": deleted_user.username, "email": deleted_user.email,
+        "name": deleted_user.name, "last_name": deleted_user.last_name, "active": deleted_user.active,
+        "role": None
+    }
+    if deleted_user.role:
+         user_data["role"] = {"role_name": deleted_user.role.role_name, "permissions": []}
+    return schemas.User.model_validate(user_data)
+
+@app.post("/api/v1/auth/token", response_model=schemas.Token)
+async def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(), 
+    db: AsyncSession = Depends(get_db)
+):
+    user = await crud.get_user_by_username(db, username=form_data.username)
+    if not user or not security.verify_password(form_data.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=security.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = security.create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/api/v1/users/me/", response_model=schemas.User)
+async def read_users_me(current_user: models.Users = Depends(security.get_current_active_user)):
+    user_data = {
+        "id": current_user.id, "username": current_user.username, "email": current_user.email,
+        "name": current_user.name, "last_name": current_user.last_name, "active": current_user.active,
+        "role": None
+    }
+    if current_user.role:
+        permissions_list = [rp.permission for rp in current_user.role.role_permissions if rp.permission]
+        user_data["role"] = {"role_name": current_user.role.role_name, "permissions": permissions_list}
+    return user_data
+
+
+@app.get("/api/v1/all_models_full_info", response_model=List[schemas.ModelDetail], tags=["Models"])
+async def read_all_models_full_info(
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """
+    Получает список всех моделей с полной информацией (название, память, цвет) для выбора в заказах.
+    """
+    models_data = await crud.get_all_models_full_info(db=db)
+    
+    formatted_models = []
+    for m in models_data:
+        # Проверяем наличие model_name объекта, его id и name
+        if not m.model_name or m.model_name.id is None or not m.model_name.name:
+            continue
+        
+        # ADD NEW: Получаем данные и форматируем полное название ВРУЧНУЮ
+        model_id = m.id # ID самой модели
+        model_name_base_id = m.model_name.id # ID базового имени
+        model_name_base_name = m.model_name.name # Базовое имя
+        
+        storage_id = m.storage.id if m.storage and m.storage.id is not None else None
+        storage_value = m.storage.storage if m.storage and m.storage.storage is not None else None
+        
+        color_id = m.color.id if m.color and m.color.id is not None else None
+        color_name = m.color.color_name if m.color and m.color.color_name else None
+
+        # Форматирование storage (используя функцию из models.py)
+        formatted_storage_display = models.format_storage_for_display(storage_value)
+        
+        # Формируем полное отображаемое название (ОНО СТАНЕТ name В ModelDetail)
+        full_model_display_name_parts = [model_name_base_name]
+        if formatted_storage_display:
+            full_model_display_name_parts.append(formatted_storage_display)
+        if color_name:
+            full_model_display_name_parts.append(color_name)
+        
+        full_model_display_name = " ".join(full_model_display_name_parts).strip()
+
+        # <--- ИСПРАВЛЕНО: ЯВНО СОЗДАЕМ ModelDetail, передавая name и все вложенные объекты ---
+        formatted_models.append(schemas.ModelDetail(
+        id=model_id,
+        name=full_model_display_name,
+        base_name=model_name_base_name,
+        model_name_id=model_name_base_id,
+        storage_id=storage_id,
+        color_id=color_id
+    ))
+        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+    return formatted_models
+
+# --- НОВЫЙ ЭНДПОИНТ: Получение уникальных базовых названий моделей ---
+@app.get("/api/v1/unique_model_names", response_model=List[schemas.ModelName], tags=["Models"])
+async def read_unique_model_names(
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """Получает список уникальных базовых названий моделей для выпадающего списка 'Базовая модель'."""
+    unique_names = await crud.get_unique_model_names(db=db)
+    # Возвращаем ModelName объекты, которые уже содержат id и name базовой модели
+    return [schemas.ModelName.model_validate(n) for n in unique_names]
+
+
+# --- Новые эндпоинты для получения всех опций памяти ---
+@app.get("/api/v1/storage_options", response_model=List[schemas.Storage], tags=["Options"])
+async def read_storage_options(
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """Получает список всех доступных опций памяти."""
+    storage_data = await crud.get_all_storage_options(db=db)
+    return [schemas.Storage.model_validate(s) for s in storage_data]
+
+# --- Новые эндпоинты для получения всех опций цвета ---
+@app.get("/api/v1/color_options", response_model=List[schemas.Color], tags=["Options"])
+async def read_color_options(
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """Получает список всех доступных опций цвета."""
+    color_data = await crud.get_all_color_options(db=db)
+    return [schemas.Color.model_validate(c) for c in color_data]
+
+
+# --- Новый эндпоинт для получения ВСЕХ аксессуаров ---
+@app.get("/api/v1/all_accessories_info", response_model=List[schemas.Accessory], tags=["Accessories"])
+async def read_all_accessories_info(
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """Получает список всех аксессуаров для выбора в заказах."""
+    accessories_data = await crud.get_all_accessories_info(db=db)
+    return [schemas.Accessory.model_validate(a) for a in accessories_data]
+
+@app.get("/api/v1/accessories/in-stock", response_model=List[schemas.AccessoryInStock], tags=["Accessories"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def read_accessories_in_stock(db: AsyncSession = Depends(get_db)):
+    """Получает список аксессуаров, которые есть на складе."""
+    results = await crud.get_accessories_in_stock(db=db)
+
+    response_list = []
+    for acc, quantity in results:
+        latest_price = None
+        if acc.retail_price_accessories:
+            latest_price_entry = sorted(acc.retail_price_accessories, key=lambda p: p.date, reverse=True)[0]
+            latest_price = latest_price_entry.price
+
+        acc_in_stock = schemas.AccessoryInStock(
+            id=acc.id,
+            name=acc.name,
+            barcode=acc.barcode,
+            category_accessory=acc.category_accessory,
+            purchase_price=acc.purchase_price,
+            current_price=latest_price,
+            quantity=quantity
+        )
+        response_list.append(acc_in_stock)
+    return response_list
+
+
+# --- Эндпоинт для получения списка телефонов ---
+
+# MODIFY: Обновляем read_phones, чтобы он тоже явно формировал ModelDetail
+@app.get("/api/v1/phones", response_model=List[schemas.Phone], tags=["Phones"])
+async def read_phones(
+    skip: int = 0,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """
+    Получает список всех телефонов.
+    Доступно только для авторизованных пользователей.
+    """
+    phones = await crud.get_phones(db=db, skip=skip, limit=limit)
+    
+    formatted_phones_for_response = []
+    for phone in phones:
+        phone_dict = phone.__dict__.copy() 
+        
+        if phone.technical_status:
+            phone_dict["technical_status"] = models.format_enum_value_for_display(phone.technical_status.value)
+        else:
+            phone_dict["technical_status"] = None
+
+        if phone.commercial_status:
+            phone_dict["commercial_status"] = models.format_enum_value_for_display(phone.commercial_status.value)
+        else:
+            phone_dict["commercial_status"] = None
+
+        if phone.model: # Убедимся, что phone.model существует
+            model_obj = phone.model
+            
+            model_id = model_obj.id
+            model_name_base_id = model_obj.model_name.id if model_obj.model_name else None
+            model_name_base_name = model_obj.model_name.name if model_obj.model_name and model_obj.model_name.name else "Без названия"
+            
+            storage_id = model_obj.storage.id if model_obj.storage and model_obj.storage.id is not None else None
+            storage_value = model_obj.storage.storage if model_obj.storage and model_obj.storage.storage is not None else None
+            
+            color_id = model_obj.color.id if model_obj.color and model_obj.color.id is not None else None
+            color_name = model_obj.color.color_name if model_obj.color and model_obj.color.color_name else None
+
+            formatted_storage_display = models.format_storage_for_display(storage_value)
+            
+            full_model_display_name_parts = [model_name_base_name]
+            if formatted_storage_display:
+                full_model_display_name_parts.append(formatted_storage_display)
+            if color_name:
+                full_model_display_name_parts.append(color_name)
+            
+            full_model_display_name = " ".join(full_model_display_name_parts).strip()
+
+            phone_dict['model'] = schemas.ModelDetail(
+                id=model_id, 
+                name=full_model_display_name, 
+                base_name=model_name_base_name, # <--- ИСПРАВЛЕНО: Присваиваем базовое название
+                model_name_id=model_name_base_id, 
+                storage_id=storage_id, 
+                color_id=color_id
+            )
+        else:
+            phone_dict['model'] = None 
+
+        if 'added_date' not in phone_dict and hasattr(phone, 'added_date'):
+             phone_dict['added_date'] = phone.added_date
+
+        formatted_phones_for_response.append(schemas.Phone.model_validate(phone_dict))
+    
+    return formatted_phones_for_response
+
+
+
+@app.get("/api/v1/phones/history/{serial_number}", response_model=schemas.PhoneHistoryResponse, tags=["Phones"])
+async def get_phone_history(
+    serial_number: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Получает полную историю телефона по его серийному номеру, включая все логи."""
+    
+    phone = await crud.get_phone_history_by_serial(db=db, serial_number=serial_number)
+    
+    if not phone:
+        raise HTTPException(status_code=404, detail="Телефон не найден")
+
+    # --- НАЧАЛО ИСПРАВЛЕНИЯ: Вручную собираем объект ответа ---
+
+    # 1. Собираем информацию о модели, как мы это делаем в других эндпоинтах
+    model_detail = None
+    if phone.model:
+        model_name_base = phone.model.model_name.name if phone.model.model_name else ""
+        storage_display = models.format_storage_for_display(phone.model.storage.storage) if phone.model.storage else ""
+        color_name = phone.model.color.color_name if phone.model.color else ""
+        full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+        model_detail = schemas.ModelDetail(
+            id=phone.model.id,
+            name=full_display_name,
+            base_name=model_name_base,
+            model_name_id=phone.model.model_name_id,
+            storage_id=phone.model.storage_id,
+            color_id=phone.model.color_id
+        )
+
+    # 2. Собираем остальную информацию (этот код уже был в crud.py, но теперь его место здесь)
+    purchase_info = None
+    if phone.supplier_order:
+        purchase_info = schemas.PhoneHistoryPurchase(
+            supplier_order_id=phone.supplier_order.id,
+            order_date=phone.supplier_order.order_date,
+            purchase_price=phone.purchase_price,
+            supplier_name=phone.supplier_order.supplier.name if phone.supplier_order.supplier else "Неизвестно"
+        )
+
+    # 3. Собираем информацию об инспекциях
+    inspections_list = []
+    for insp in phone.device_inspections:
+        inspection_details = schemas.PhoneHistoryInspection(
+            inspection_date=insp.inspection_date,
+            inspected_by=insp.user.name if insp.user else "Неизвестно",
+            results=[
+                schemas.PhoneHistoryInspectionResult(
+                    item_name=res.checklist_item.name,
+                    result=res.result,
+                    notes=res.notes
+                ) for res in insp.inspection_results
+            ],
+            battery_tests=[
+                schemas.PhoneHistoryBatteryTest(
+                    start_time=bt.start_time,
+                    end_time=bt.end_time,
+                    start_battery_level=bt.start_battery_level,
+                    end_battery_level=bt.end_battery_level,
+                    battery_drain=bt.battery_drain
+                ) for bt in insp.battery_tests
+            ]
+        )
+        inspections_list.append(inspection_details)
+
+    # 4. Находим информацию о складе и продаже (это требует доп. запросов)
+    warehouse_info = None
+    sale_info = None
+    
+    warehouse_entry_result = await db.execute(
+        select(models.Warehouse)
+        .options(selectinload(models.Warehouse.shop), selectinload(models.Warehouse.user))
+        .filter_by(product_id=phone.id, product_type_id=1)
+    )
+    warehouse_entry = warehouse_entry_result.scalars().first()
+
+    if warehouse_entry:
+        warehouse_info = schemas.PhoneHistoryWarehouse(
+            added_date=warehouse_entry.added_date,
+            shop_name=warehouse_entry.shop.name if warehouse_entry.shop else "Неизвестно",
+            accepted_by=warehouse_entry.user.name if warehouse_entry.user else "Неизвестно"
+        )
+
+        sale_detail_result = await db.execute(
+            select(models.SaleDetails)
+            .options(selectinload(models.SaleDetails.sale).selectinload(models.Sales.customer))
+            .filter_by(warehouse_id=warehouse_entry.id)
+        )
+        sale_detail = sale_detail_result.scalars().first()
+        if sale_detail and sale_detail.sale:
+            sale = sale_detail.sale
+            sale_info = schemas.PhoneHistorySale(
+                sale_id=sale.id,
+                sale_date=sale.sale_date,
+                unit_price=sale_detail.unit_price,
+                customer_name=sale.customer.name if sale.customer else None,
+                customer_number=sale.customer.number if sale.customer else None,
+            )
+
+    # 5. Собираем финальный ответ для Pydantic
+    return schemas.PhoneHistoryResponse(
+        id=phone.id,
+        serial_number=phone.serial_number,
+        technical_status=phone.technical_status.value if phone.technical_status else None,
+        commercial_status=phone.commercial_status.value if phone.commercial_status else None,
+        added_date=phone.added_date,
+        model=model_detail,
+        model_number=phone.model_number,
+        movement_logs=[
+            schemas.PhoneMovementLog(
+                id=log.id,
+                timestamp=log.timestamp,
+                event_type=log.event_type.value.replace('_', ' ').capitalize(),
+                details=log.details,
+                user=log.user
+            ) for log in phone.movement_logs
+        ],
+        purchase_info=purchase_info,
+        inspections=inspections_list,
+        warehouse_info=warehouse_info,
+        sale_info=sale_info
+    )
+
+# --- Эндпоинты для Поставщиков ---
+
+@app.post("/api/v1/suppliers", response_model=schemas.Supplier, tags=["Suppliers"])
+async def create_new_supplier(
+    supplier: schemas.SupplierCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """
+    Создает нового поставщика в базе данных.
+    """
+    return await crud.create_supplier(db=db, supplier=supplier)
+
+
+@app.get("/api/v1/suppliers", response_model=List[schemas.Supplier], tags=["Suppliers"])
+async def read_suppliers(
+    skip: int = 0,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """
+    Получает список всех поставщиков.
+    """
+    suppliers = await crud.get_suppliers(db=db, skip=skip, limit=limit)
+    return suppliers
+
+@app.delete("/api/v1/suppliers/{supplier_id}", response_model=schemas.Supplier, tags=["Suppliers"])
+async def remove_supplier(
+    supplier_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """
+    Удаляет поставщика по ID.
+    """
+    db_supplier = await crud.delete_supplier(db=db, supplier_id=supplier_id)
+    if db_supplier is None:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    return db_supplier
+
+@app.put("/api/v1/suppliers/{supplier_id}", response_model=schemas.Supplier, tags=["Suppliers"])
+async def edit_supplier(
+    supplier_id: int,
+    supplier: schemas.SupplierCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """
+    Редактирует данные поставщика по ID.
+    """
+    updated_supplier = await crud.update_supplier(db=db, supplier_id=supplier_id, supplier=supplier)
+    if updated_supplier is None:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    return updated_supplier
+
+# --- Эндпоинты для Заказов у Поставщиков ---
+
+# app/main.py
+
+# app/main.py
+
+@app.post("/api/v1/supplier-orders", response_model=schemas.SupplierOrder, tags=["Supplier Orders"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def create_new_supplier_order(
+    order: schemas.SupplierOrderCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """
+    Создает новый заказ у поставщика и возвращает его в полностью отформатированном виде.
+    """
+    # 1. Создаем объект заказа в базе данных
+    db_order = models.SupplierOrders(
+        supplier_id=order.supplier_id,
+        order_date=datetime.now(),
+        status=models.StatusDelivery.ЗАКАЗ,
+        payment_status=models.OrderPaymentStatus.НЕ_ОПЛАЧЕН, # <-- Убедитесь, что это установлено
+        supplier_order_details=[
+            models.SupplierOrderDetails(**detail.model_dump())
+            for detail in order.details
+        ]
+    )
+    db.add(db_order)
+    await db.commit()
+    await db.refresh(db_order)
+
+    new_order_id = db_order.id
+
+    result = await db.execute(
+        select(models.SupplierOrders).options(
+            joinedload(models.SupplierOrders.supplier_order_details).options(
+                joinedload(models.SupplierOrderDetails.model).options(
+                    selectinload(models.Models.model_name),
+                    selectinload(models.Models.storage),
+                    selectinload(models.Models.color)
+                ),
+                joinedload(models.SupplierOrderDetails.accessory)
+            )
+        ).filter(models.SupplierOrders.id == new_order_id)
+    )
+    full_new_order = result.unique().scalars().one_or_none()
+
+    if not full_new_order:
+        raise HTTPException(status_code=404, detail="Только что созданный заказ не найден")
+
+    formatted_status_delivery = models.format_enum_value_for_display(full_new_order.status.value) if full_new_order.status else None
+    formatted_payment_status = models.format_enum_value_for_display(full_new_order.payment_status.value) if full_new_order.payment_status else None
+
+    formatted_details = []
+    for detail in full_new_order.supplier_order_details:
+        detail_dict = {
+            "id": detail.id, "supplier_order_id": detail.supplier_order_id,
+            "model_id": detail.model_id, "accessory_id": detail.accessory_id,
+            "quantity": detail.quantity, "price": detail.price,
+            "model_name": None, "accessory_name": None
+        }
+        if detail.model:
+            model_name = detail.model.model_name.name if detail.model.model_name else "Модель"
+            storage_info = models.format_storage_for_display(detail.model.storage.storage) if detail.model.storage and detail.model.storage.storage is not None else ""
+            color_info = detail.model.color.color_name if detail.model.color and detail.model.color.color_name else ""
+            full_name_parts = [part for part in [model_name, storage_info, color_info] if part]
+            detail_dict['model_name'] = " ".join(full_name_parts)
+        if detail.accessory:
+            detail_dict['accessory_name'] = detail.accessory.name
+        validated_detail = schemas.SupplierOrderDetail.model_validate(detail_dict)
+        formatted_details.append(validated_detail)
+
+    return schemas.SupplierOrder(
+        id=full_new_order.id,
+        supplier_id=full_new_order.supplier_id,
+        order_date=full_new_order.order_date,
+        status=formatted_status_delivery,
+        payment_status=formatted_payment_status, # <-- ВКЛЮЧАЕМ НОВЫЙ СТАТУС ОПЛАТЫ
+        details=formatted_details
+    )
+
+
+@app.get("/api/v1/supplier-orders", response_model=List[schemas.SupplierOrder], tags=["Supplier Orders"], dependencies=[Depends(security.require_any_permission("manage_inventory", "receive_supplier_orders"))])
+async def read_supplier_orders(
+    skip: int = 0,
+    limit: int = 100000,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user),
+):
+    # Эта проверка теперь контролирует всю финансовую информацию
+    can_view_financial_info = security.user_has_permission(current_user, "view_purchase_prices")
+    
+    is_limited_role = not security.user_has_permission(current_user, "manage_inventory")
+    
+    orders = await crud.get_supplier_orders(db=db, skip=skip, limit=limit, apply_role_limit=is_limited_role)
+
+    formatted_orders = []
+    for order in orders:
+        formatted_status_delivery = order.status.value.replace('_', ' ').capitalize() if order.status else None
+        
+        # Скрываем статус оплаты, если нет прав
+        formatted_payment_status = "—" # По умолчанию ставим прочерк
+        if can_view_financial_info and order.payment_status:
+            formatted_payment_status = order.payment_status.value.replace('_', ' ').capitalize()
+
+        formatted_details = []
+        for detail in order.supplier_order_details:
+            detail_dict = {
+                "id": detail.id, "supplier_order_id": detail.supplier_order_id,
+                "model_id": detail.model_id, "accessory_id": detail.accessory_id,
+                "quantity": detail.quantity, "price": detail.price,
+                "model_name": None, "accessory_name": None
+            }
+            
+            # Цена уже скрывается этой логикой
+            if not can_view_financial_info:
+                detail_dict['price'] = 0.0
+
+            if detail.model:
+                model_name = detail.model.model_name.name if detail.model.model_name else "Неизвестно"
+                storage_info = models.format_storage_for_display(detail.model.storage.storage) if detail.model.storage and detail.model.storage.storage is not None else "Неизвестно"
+                color_info = detail.model.color.color_name if detail.model.color else "Неизвестно"
+                detail_dict['model_name'] = f"{model_name} {storage_info} {color_info}".strip()
+
+            if detail.accessory:
+                detail_dict['accessory_name'] = detail.accessory.name
+                
+            formatted_details.append(schemas.SupplierOrderDetail.model_validate(detail_dict)) 
+
+        formatted_orders.append(
+            schemas.SupplierOrder(
+                id=order.id,
+                supplier_id=order.supplier_id,
+                order_date=order.order_date,
+                status=formatted_status_delivery,
+                payment_status=formatted_payment_status,
+                details=formatted_details
+            )
+        )
+    return formatted_orders
+
+
+@app.put("/api/v1/supplier-orders/{order_id}/receive", response_model=schemas.SupplierOrder, tags=["Supplier Orders"], dependencies=[Depends(security.require_any_permission("manage_inventory", "receive_supplier_orders"))])
+async def receive_order(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """
+    Отметить заказ как "Получен" и добавить все телефоны из него на склад.
+    """
+    updated_order = await crud.receive_supplier_order(db=db, order_id=order_id, user_id=current_user.id)    
+
+    result = await db.execute(
+        select(models.SupplierOrders).options(
+            joinedload(models.SupplierOrders.supplier_order_details).options(
+                selectinload(models.SupplierOrderDetails.model).options(
+                    selectinload(models.Models.model_name),
+                    selectinload(models.Models.storage),
+                    selectinload(models.Models.color)
+                ),
+                joinedload(models.SupplierOrderDetails.accessory)
+            )
+        ).filter(models.SupplierOrders.id == updated_order.id)
+    )
+    full_updated_order = result.unique().scalars().one()
+
+    formatted_status = models.format_enum_value_for_display(full_updated_order.status.value) if full_updated_order.status else None
+
+    # --- ДОБАВЛЕНА ЭТА СТРОКА ---
+    formatted_payment_status = models.format_enum_value_for_display(full_updated_order.payment_status.value) if full_updated_order.payment_status else None
+
+    formatted_details = []
+    for detail in full_updated_order.supplier_order_details:
+        detail_dict = {
+            "id": detail.id, "supplier_order_id": detail.supplier_order_id,
+            "model_id": detail.model_id, "accessory_id": detail.accessory_id,
+            "quantity": detail.quantity, "price": detail.price,
+            "model_name": None, "accessory_name": None
+        }
+        if detail.model:
+            model_name = detail.model.model_name.name if detail.model.model_name else "Модель"
+            storage_info = models.format_storage_for_display(detail.model.storage.storage) if detail.model.storage and detail.model.storage.storage is not None else ""
+            color_info = detail.model.color.color_name if detail.model.color and detail.model.color.color_name else ""
+            full_name_parts = [part for part in [model_name, storage_info, color_info] if part]
+            detail_dict['model_name'] = " ".join(full_name_parts)
+        if detail.accessory:
+            detail_dict['accessory_name'] = detail.accessory.name
+
+        validated_detail = schemas.SupplierOrderDetail.model_validate(detail_dict)
+        formatted_details.append(validated_detail)
+
+    return schemas.SupplierOrder(
+        id=full_updated_order.id,
+        supplier_id=full_updated_order.supplier_id,
+        order_date=full_updated_order.order_date,
+        status=formatted_status,
+        # --- И ДОБАВЛЕНА ЭТА СТРОКА ---
+        payment_status=formatted_payment_status,
+        details=formatted_details
+    )
+
+
+@app.get("/api/v1/shops", response_model=List[schemas.Shop], tags=["Warehouse"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def read_shops(db: AsyncSession = Depends(get_db), current_user: schemas.User = Depends(security.get_current_active_user)):
+    return await crud.get_shops(db=db)
+
+@app.get("/api/v1/phones/ready-for-stock", response_model=List[schemas.Phone], tags=["Warehouse"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def read_phones_ready_for_stock(
+    db: AsyncSession = Depends(get_db), 
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    phones = await crud.get_phones_ready_for_stock(db=db)
+    
+    # --- НАЧАЛО БЛОКА ФОРМАТИРОВАНИЯ ---
+    formatted_phones = []
+    for phone in phones:
+        phone_dict = {
+            "id": phone.id,
+            "serial_number": phone.serial_number,
+            "technical_status": phone.technical_status.value if phone.technical_status else None,
+            "commercial_status": phone.commercial_status.value if phone.commercial_status else None,
+            "added_date": phone.added_date,
+            "model": None
+        }
+
+        if phone.model:
+            model_name_base = phone.model.model_name.name if phone.model.model_name else ""
+            storage_display = models.format_storage_for_display(phone.model.storage.storage) if phone.model.storage else ""
+            color_name = phone.model.color.color_name if phone.model.color else ""
+
+            full_name_parts = [part for part in [model_name_base, storage_display, color_name] if part]
+            full_display_name = " ".join(full_name_parts)
+
+            phone_dict['model'] = schemas.ModelDetail(
+                id=phone.model.id,
+                name=full_display_name,
+                base_name=model_name_base,
+                model_name_id=phone.model.model_name_id,
+                storage_id=phone.model.storage_id,
+                color_id=phone.model.color_id
+            )
+        
+        formatted_phones.append(schemas.Phone.model_validate(phone_dict))
+    
+    return formatted_phones
+
+@app.post("/api/v1/warehouse/accept-phones", response_model=List[schemas.Phone], tags=["Warehouse"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def accept_phones_to_warehouse_endpoint(
+    data: schemas.WarehouseAcceptanceRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    updated_phones = await crud.accept_phones_to_warehouse(db=db, data=data, user_id=current_user.id)
+
+    # --- НАЧАЛО БЛОКА ФОРМАТИРОВАНИЯ ---
+    formatted_phones = []
+    for phone in updated_phones:
+        phone_dict = {
+            "id": phone.id,
+            "serial_number": phone.serial_number,
+            "technical_status": phone.technical_status.value if phone.technical_status else None,
+            "commercial_status": phone.commercial_status.value if phone.commercial_status else None,
+            "added_date": phone.added_date,
+            "model": None
+        }
+
+        if phone.model:
+            model_name_base = phone.model.model_name.name if phone.model.model_name else ""
+            storage_display = models.format_storage_for_display(phone.model.storage.storage) if phone.model.storage else ""
+            color_name = phone.model.color.color_name if phone.model.color else ""
+
+            full_name_parts = [part for part in [model_name_base, storage_display, color_name] if part]
+            full_display_name = " ".join(full_name_parts)
+
+            phone_dict['model'] = schemas.ModelDetail(
+                id=phone.model.id,
+                name=full_display_name,
+                base_name=model_name_base,
+                model_name_id=phone.model.model_name_id,
+                storage_id=phone.model.storage_id,
+                color_id=phone.model.color_id
+            )
+        
+        formatted_phones.append(schemas.Phone.model_validate(phone_dict))
+    
+    return formatted_phones
+
+@app.get("/api/v1/accessory-categories", response_model=List[schemas.CategoryAccessory], tags=["Accessories"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def read_accessory_categories(db: AsyncSession = Depends(get_db), current_user: schemas.User = Depends(security.get_current_active_user)):
+    """Получает список всех категорий аксессуаров."""
+    return await crud.get_accessory_categories(db=db)
+
+@app.post("/api/v1/accessories", response_model=schemas.Accessory, tags=["Accessories"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def create_new_accessory(
+    accessory: schemas.AccessoryCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Создает новый аксессуар."""
+    return await crud.create_accessory(db=db, accessory=accessory)
+
+
+@app.get("/api/v1/accessories", response_model=List[schemas.AccessoryDetail], tags=["Accessories"])
+async def read_all_accessories(
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Получает полный список аксессуаров с категориями и актуальными ценами."""
+    accessories_data = await crud.get_all_accessories(db=db)
+    
+    response_list = []
+    for acc in accessories_data:
+        # --- START OF FIX ---
+        latest_price = None
+        if acc.retail_price_accessories:
+            latest_price_entry = sorted(acc.retail_price_accessories, key=lambda p: p.date, reverse=True)[0]
+            latest_price = latest_price_entry.price
+
+        # Create the response object using all fields from the schema
+        acc_detail = schemas.AccessoryDetail(
+            id=acc.id,
+            name=acc.name,
+            barcode=acc.barcode,
+            category_accessory=acc.category_accessory,
+            current_price=latest_price # This field is now correctly populated
+        )
+        response_list.append(acc_detail)
+        # --- END OF FIX ---
+        
+    return response_list
+
+@app.get("/api/v1/customers", response_model=List[schemas.Customer], tags=["Sales"])
+async def read_customers(db: AsyncSession = Depends(get_db), current_user: schemas.User = Depends(security.get_current_active_user)):
+    return await crud.get_customers(db=db)
+
+@app.get("/api/v1/products-for-sale", response_model=List[schemas.ProductForSale], tags=["Sales"],
+         dependencies=[Depends(security.require_permission("perform_sales"))])
+async def read_products_for_sale(db: AsyncSession = Depends(get_db), current_user: schemas.User = Depends(security.get_current_active_user)):
+    warehouse_items = await crud.get_products_for_sale(db=db)
+    
+
+    products_for_sale = []
+    for item in warehouse_items:
+        
+        # В предыдущем исправлении мы добавили атрибут 'product' в crud.py
+        if not hasattr(item, 'product') or not item.product:
+            
+            continue
+
+        product_obj = item.product
+        name = ""
+        price = None
+        serial_number = None
+        product_type = "Неизвестно"
+
+        if isinstance(product_obj, models.Phones):
+            product_type = "Телефон"
+            serial_number = product_obj.serial_number
+            if product_obj.model:
+                model_name_base = product_obj.model.model_name.name if product_obj.model.model_name else ""
+                storage_display = models.format_storage_for_display(product_obj.model.storage.storage) if product_obj.model.storage else ""
+                color_name = product_obj.model.color.color_name if product_obj.model.color else ""
+                full_name_parts = [part for part in [model_name_base, storage_display, color_name] if part]
+                name = " ".join(full_name_parts)
+                if product_obj.model.retail_prices_phones:
+                    latest_price_entry = sorted(product_obj.model.retail_prices_phones, key=lambda p: p.date, reverse=True)[0]
+                    price = latest_price_entry.price
+        
+        elif isinstance(product_obj, models.Accessories):
+            product_type = "Аксессуар"
+            name = product_obj.name
+            if product_obj.retail_price_accessories:
+                latest_price_entry = sorted(product_obj.retail_price_accessories, key=lambda p: p.date, reverse=True)[0]
+                price = latest_price_entry.price
+        
+        
+
+        products_for_sale.append(
+            schemas.ProductForSale(
+                warehouse_id=item.id,
+                product_id=product_obj.id,
+                product_type=product_type,
+                name=name,
+                price=price,
+                serial_number=serial_number,
+                quantity=item.quantity
+            )
+        )
+    
+    
+    return products_for_sale
+
+@app.post("/api/v1/sales", response_model=schemas.SaleResponse, tags=["Sales"],
+          dependencies=[Depends(security.require_permission("perform_sales"))])
+async def create_new_sale(
+    sale_data: schemas.SaleCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Создает новую продажу и возвращает полную информацию для чека."""
+    
+    # 1. Вызываем CRUD-функцию, которая создает все записи в базе данных
+    created_sale = await crud.create_sale(db=db, sale_data=sale_data, user_id=current_user.id)
+
+    # 2. Запрашиваем созданную продажу со связями, чтобы получить ID товаров
+    fresh_sale_result = await db.execute(
+        select(models.Sales)
+        .options(
+            selectinload(models.Sales.sale_details).selectinload(models.SaleDetails.warehouse)
+        )
+        .filter(models.Sales.id == created_sale.id)
+    )
+    fresh_sale = fresh_sale_result.scalars().one_or_none()
+
+    if not fresh_sale:
+        raise HTTPException(status_code=404, detail="Не удалось найти созданную продажу.")
+
+    # 3. Собираем ID телефонов и аксессуаров из деталей продажи
+    phone_ids = []
+    accessory_ids = []
+    for detail in fresh_sale.sale_details:
+        if detail.warehouse.product_type_id == 1:
+            phone_ids.append(detail.warehouse.product_id)
+        elif detail.warehouse.product_type_id == 2:
+            accessory_ids.append(detail.warehouse.product_id)
+
+    # 4. Загружаем все нужные телефоны и аксессуары ОДНИМ запросом для каждого типа
+    phones_map = {}
+    if phone_ids:
+        phones_res = await db.execute(
+            select(models.Phones).options(
+                selectinload(models.Phones.model).options(
+                    selectinload(models.Models.model_name),
+                    selectinload(models.Models.storage),
+                    selectinload(models.Models.color)
+                ),
+                selectinload(models.Phones.model_number)
+            ).filter(models.Phones.id.in_(phone_ids))
+        )
+        phones_map = {p.id: p for p in phones_res.scalars().all()}
+    
+    accessories_map = {}
+    if accessory_ids:
+        accessories_res = await db.execute(select(models.Accessories).filter(models.Accessories.id.in_(accessory_ids)))
+        accessories_map = {a.id: a for a in accessories_res.scalars().all()}
+
+    # 5. Теперь собираем финальный ответ, используя загруженные данные
+    response_details = []
+    for detail in fresh_sale.sale_details:
+        product_name = "Неизвестный товар"
+        serial_number, model_number = None, None
+        
+        warehouse = detail.warehouse
+        if warehouse.product_type_id == 1: # Телефон
+            product_obj = phones_map.get(warehouse.product_id)
+            if product_obj:
+                serial_number = product_obj.serial_number
+                model_number = product_obj.model_number.name if product_obj.model_number else None
+                if product_obj.model:
+                    model_name_base = product_obj.model.model_name.name if product_obj.model.model_name else ""
+                    storage_display = models.format_storage_for_display(product_obj.model.storage.storage) if product_obj.model.storage else ""
+                    color_name = product_obj.model.color.color_name if product_obj.model.color else ""
+                    product_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+        
+        elif warehouse.product_type_id == 2: # Аксессуар
+            product_obj = accessories_map.get(warehouse.product_id)
+            if product_obj:
+                product_name = product_obj.name
+
+        response_details.append(
+            schemas.SaleDetailResponse(
+                id=detail.id,
+                product_name=product_name,
+                serial_number=serial_number,
+                model_number=model_number,
+                quantity=detail.quantity,
+                unit_price=detail.unit_price
+            )
+        )
+
+    return schemas.SaleResponse(
+        id=fresh_sale.id,
+        sale_date=fresh_sale.sale_date,
+        customer_id=fresh_sale.customer_id,
+        total_amount=fresh_sale.total_amount,
+        details=response_details
+    )
+
+
+@app.post("/api/v1/accessories/{accessory_id}/prices", response_model=schemas.RetailPriceResponse, tags=["Pricing"]
+          ,dependencies=[Depends(security.require_permission("manage_pricing"))])
+async def create_price_for_accessory(
+    accessory_id: int,
+    price_data: schemas.PriceCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    return await crud.add_price_for_accessory(db=db, accessory_id=accessory_id, price_data=price_data)
+
+
+@app.get("/api/v1/model-storage-combos", response_model=List[schemas.ModelStorageCombo], tags=["Pricing"],
+         dependencies=[Depends(security.require_permission("manage_pricing"))])
+async def read_model_storage_combos(
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Возвращает уникальные комбинации 'модель + память' для установки цен."""
+    return await crud.get_unique_model_storage_combos(db=db)
+
+@app.post("/api/v1/prices/phone-combo", response_model=List[schemas.RetailPriceResponse], tags=["Pricing"],
+          dependencies=[Depends(security.require_permission("manage_pricing"))])
+async def create_price_for_combo(
+    price_data: schemas.PriceSetForCombo,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Устанавливает цену для всех цветовых вариаций одной модели."""
+    return await crud.add_price_for_model_storage_combo(db=db, data=price_data)
+
+@app.post("/api/v1/supplier-orders/{order_id}/pay", 
+          response_model=schemas.SupplierOrder, 
+          tags=["Supplier Orders"],
+          dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def pay_for_supplier_order_endpoint(
+    order_id: int,
+    payment_data: schemas.SupplierPaymentCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user),
+):
+    """
+    Регистрирует оплату за заказ поставщику и создает запись в движении денег.
+    Возвращает обновленный объект заказа.
+    """
+    if payment_data.supplier_order_id != order_id:
+        raise HTTPException(status_code=400, detail="ID заказа в теле запроса не соответствует ID в пути.")
+
+    # 1. Получаем ТОЛЬКО ID обновленного заказа
+    updated_order_id = await crud.pay_supplier_order(db=db, payment_data=payment_data, user_id=current_user.id)
+
+    # 2. Теперь в рамках ОДНОЙ сессии загружаем этот заказ со ВСЕМИ нужными связями
+    result = await db.execute(
+        select(models.SupplierOrders).options(
+            # Используем joinedload/selectinload для "энергичной" загрузки
+            selectinload(models.SupplierOrders.supplier_order_details).options(
+                joinedload(models.SupplierOrderDetails.model).options(
+                    selectinload(models.Models.model_name),
+                    selectinload(models.Models.storage),
+                    selectinload(models.Models.color)
+                ),
+                joinedload(models.SupplierOrderDetails.accessory)
+            )
+        ).filter(models.SupplierOrders.id == updated_order_id)
+    )
+    # .unique() нужен, чтобы избежать дубликатов из-за join'ов
+    full_order_for_response = result.unique().scalars().one_or_none()
+
+    if not full_order_for_response:
+        raise HTTPException(status_code=404, detail="Не удалось найти заказ после обновления.")
+
+    # 3. Форматируем уже полностью загруженные данные для ответа
+    formatted_status_delivery = models.format_enum_value_for_display(full_order_for_response.status.value) if full_order_for_response.status else None
+    formatted_payment_status = models.format_enum_value_for_display(full_order_for_response.payment_status.value) if full_order_for_response.payment_status else None
+    
+    formatted_details = []
+    for detail in full_order_for_response.supplier_order_details:
+        detail_dict = {
+            "id": detail.id, "supplier_order_id": detail.supplier_order_id,
+            "model_id": detail.model_id, "accessory_id": detail.accessory_id,
+            "quantity": detail.quantity, "price": detail.price,
+            "model_name": None, "accessory_name": None
+        }
+
+        if detail.model:
+            model_name = detail.model.model_name.name if detail.model.model_name else ""
+            storage_info = models.format_storage_for_display(detail.model.storage.storage) if detail.model.storage else ""
+            color_info = detail.model.color.color_name if detail.model.color else ""
+            detail_dict['model_name'] = f"{model_name} {storage_info} {color_info}".strip()
+        
+        if detail.accessory:
+            detail_dict['accessory_name'] = detail.accessory.name
+
+        formatted_details.append(schemas.SupplierOrderDetail.model_validate(detail_dict))
+
+    return schemas.SupplierOrder(
+        id=full_order_for_response.id,
+        supplier_id=full_order_for_response.supplier_id,
+        order_date=full_order_for_response.order_date,
+        status=formatted_status_delivery,
+        payment_status=formatted_payment_status,
+        details=formatted_details
+    )
+
+
+@app.get("/api/v1/warehouse/valuation", response_model=schemas.InventoryValuation, tags=["Warehouse"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def read_inventory_valuation(
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Возвращает общую стоимость телефонов на складе по закупочной цене."""
+    total = await crud.get_inventory_valuation(db=db)
+    return schemas.InventoryValuation(total_valuation=total)
+
+@app.get("/api/v1/reports/profit", 
+         response_model=schemas.ProfitReport,
+         tags=["Reports"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_profit_report(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Возвращает отчет по прибыли за указанный период."""
+    report_data = await crud.get_profit_report(db=db, start_date=start_date, end_date=end_date)
+    return schemas.ProfitReport(**report_data)
+
+
+# --- Эндпоинты для совместимости Аксессуаров ---
+
+@app.post("/api/v1/accessory-model-links", response_model=schemas.AccessoryModelLink, tags=["Accessory Compatibility"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def create_accessory_model_link(link_data: schemas.AccessoryModelCreate, db: AsyncSession = Depends(get_db)):
+    new_link = await crud.link_accessory_to_model(db=db, link_data=link_data)
+    # Вручную соберем ответ, чтобы включить имена
+    return schemas.AccessoryModelLink(
+        id=new_link.id,
+        accessory_id=new_link.accessory_id,
+        model_name_id=new_link.model_name_id,
+        accessory_name=new_link.accessory.name,
+        model_name=new_link.model_name.name
+    )
+
+@app.get("/api/v1/accessory-model-links", response_model=List[schemas.AccessoryModelLink], tags=["Accessory Compatibility"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def read_accessory_model_links(db: AsyncSession = Depends(get_db)):
+    links = await crud.get_accessory_model_links(db=db)
+    # Преобразуем ответ, чтобы включить имена
+    return [
+        schemas.AccessoryModelLink(
+            id=link.id,
+            accessory_id=link.accessory_id,
+            model_name_id=link.model_name_id,
+            accessory_name=link.accessory.name if link.accessory else "N/A",
+            model_name=link.model_name.name if link.model_name else "N/A"
+        ) for link in links
+    ]
+
+@app.delete("/api/v1/accessory-model-links/{link_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Accessory Compatibility"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def delete_accessory_model_link(link_id: int, db: AsyncSession = Depends(get_db)):
+    await crud.unlink_accessory_from_model(db=db, link_id=link_id)
+    return
+
+@app.get("/api/v1/models/{model_name_id}/compatible-accessories", response_model=List[schemas.AccessoryDetail], tags=["Sales"])
+async def read_compatible_accessories(model_name_id: int, db: AsyncSession = Depends(get_db)):
+    accessories = await crud.get_accessories_for_model(db=db, model_name_id=model_name_id)
+    # Преобразуем в схему AccessoryDetail, которая включает актуальную цену
+    response_list = []
+    for acc in accessories:
+        latest_price = None
+        if acc.retail_price_accessories:
+            latest_price_entry = sorted(acc.retail_price_accessories, key=lambda p: p.date, reverse=True)[0]
+            latest_price = latest_price_entry.price
+
+        acc_detail = schemas.AccessoryDetail(
+            id=acc.id,
+            name=acc.name,
+            barcode=acc.barcode,
+            category_accessory=acc.category_accessory,
+            current_price=latest_price
+        )
+        response_list.append(acc_detail)
+    return response_list
+
+# --- Эндпоинты для управления браком и возвратами ---
+
+@app.get("/api/v1/phones/defective", response_model=List[schemas.Phone], tags=["Returns"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_inspections"))])
+async def read_defective_phones(db: AsyncSession = Depends(get_db)):
+    phones = await crud.get_defective_phones(db=db)
+    return [_format_phone_response(p) for p in phones]
+    # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
+@app.get("/api/v1/phones/sent-to-supplier", response_model=List[schemas.Phone], tags=["Returns"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_inspections"))])
+async def read_phones_sent_to_supplier(db: AsyncSession = Depends(get_db)):
+    phones = await crud.get_phones_sent_to_supplier(db=db)
+    return [_format_phone_response(p) for p in phones]
+
+@app.post("/api/v1/phones/send-to-supplier", response_model=List[schemas.Phone], tags=["Returns"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_inspections"))])
+async def mark_phones_as_sent_to_supplier(
+    phone_ids: List[int], 
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)):
+    updated_phones = await crud.send_phones_to_supplier(db=db, phone_ids=phone_ids, user_id=current_user.id)
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавляем форматирование ---
+    # Этот код форматирует ответ так же, как мы делали в других эндпоинтах,
+    # чтобы избежать ошибок валидации.
+    formatted_phones = []
+    for phone in updated_phones:
+        phone_dict = phone.__dict__
+        if phone.model:
+            model_name_base = phone.model.model_name.name if phone.model.model_name else ""
+            storage_display = models.format_storage_for_display(phone.model.storage.storage) if phone.model.storage else ""
+            color_name = phone.model.color.color_name if phone.model.color else ""
+            full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+            phone_dict['model'] = schemas.ModelDetail(
+                id=phone.model.id,
+                name=full_display_name,
+                base_name=model_name_base,
+                model_name_id=phone.model.model_name_id,
+                storage_id=phone.model.storage_id,
+                color_id=phone.model.color_id
+            )
+
+        # Преобразуем Enum в строку для Pydantic
+        if 'technical_status' in phone_dict and hasattr(phone_dict['technical_status'], 'value'):
+            phone_dict['technical_status'] = phone_dict['technical_status'].value
+        if 'commercial_status' in phone_dict and hasattr(phone_dict['commercial_status'], 'value'):
+            phone_dict['commercial_status'] = phone_dict['commercial_status'].value
+
+        formatted_phones.append(schemas.Phone.model_validate(phone_dict))
+
+    return formatted_phones
+
+@app.post("/api/v1/phones/{phone_id}/return-from-supplier", response_model=schemas.Phone, tags=["Returns"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_inspections"))])
+async def process_phone_return_from_supplier(phone_id: int, db: AsyncSession = Depends(get_db), current_user: models.Users = Depends(security.get_current_active_user)):
+    updated_phone = await crud.process_return_from_supplier(db=db, phone_id=phone_id, user_id=current_user.id)
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавляем форматирование ответа ---
+    phone_dict = updated_phone.__dict__
+    if updated_phone.model:
+        model_name_base = updated_phone.model.model_name.name if updated_phone.model.model_name else ""
+        storage_display = models.format_storage_for_display(updated_phone.model.storage.storage) if updated_phone.model.storage else ""
+        color_name = updated_phone.model.color.color_name if updated_phone.model.color else ""
+        full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+        phone_dict['model'] = schemas.ModelDetail(
+            id=updated_phone.model.id,
+            name=full_display_name,
+            base_name=model_name_base,
+            model_name_id=updated_phone.model.model_name_id,
+            storage_id=updated_phone.model.storage_id,
+            color_id=updated_phone.model.color_id
+        )
+
+    # Преобразуем Enum в строку для Pydantic
+    if 'technical_status' in phone_dict and hasattr(phone_dict['technical_status'], 'value'):
+        phone_dict['technical_status'] = phone_dict['technical_status'].value
+    if 'commercial_status' in phone_dict and hasattr(phone_dict['commercial_status'], 'value'):
+        phone_dict['commercial_status'] = phone_dict['commercial_status'].value
+
+    return schemas.Phone.model_validate(phone_dict)
+
+@app.post("/api/v1/phones/{phone_id}/refund", response_model=schemas.Phone, tags=["Returns"])
+async def create_refund(
+    phone_id: int,
+    refund_data: schemas.RefundRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)  
+):
+    """Оформляет возврат телефона от клиента."""
+    # Используем форматирование ответа, чтобы избежать ошибок
+    updated_phone = await crud.process_customer_refund(db=db, phone_id=phone_id, refund_data=refund_data, user_id=current_user.id)
+
+    phone_dict = updated_phone.__dict__
+    # ... (здесь можно добавить полное форматирование модели, как в других функциях)
+
+    return schemas.Phone.model_validate(phone_dict, from_attributes=True)
+
+@app.post("/api/v1/phones/{phone_id}/start-repair", response_model=schemas.Phone, tags=["Returns"])
+async def start_phone_repair(
+    phone_id: int,
+    repair_data: schemas.WarrantyRepairCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Начинает процесс гарантийного ремонта и создает акт приема."""
+    # Просто вызываем crud и возвращаем результат. Вся логика форматирования теперь там.
+    return await crud.start_warranty_repair(
+        db=db, 
+        phone_id=phone_id,
+        repair_data=repair_data,
+        user_id=current_user.id
+    )
+
+async def finish_warranty_repair(db: AsyncSession, phone_id: int, user_id: int):
+    """Завершает ремонт и создает лог."""
+    phone = await db.get(models.Phones, phone_id)
+    if not phone or phone.commercial_status != models.CommerceStatus.ГАРАНТИЙНЫЙ_РЕМОНТ:
+        raise HTTPException(status_code=400, detail="Телефон не находится в гарантийном ремонте")
+
+    phone.commercial_status = models.CommerceStatus.ПРОДАН
+    
+    log_entry = models.PhoneMovementLog(
+        phone_id=phone.id,
+        user_id=user_id,
+        event_type=models.PhoneEventType.ПОЛУЧЕН_ИЗ_РЕМОНТА,
+        details="Ремонт завершен. Телефон возвращен клиенту."
+    )
+    db.add(log_entry)
+    
+    await db.commit()
+
+    # --- НАЧАЛО ИСПРАВЛЕНИЯ ---
+    # Запрашиваем телефон заново со всеми связями, чтобы безопасно вернуть его в main.py
+    final_phone_result = await db.execute(
+        select(models.Phones).options(
+            selectinload(models.Phones.model).options(
+                selectinload(models.Models.model_name),
+                selectinload(models.Models.storage),
+                selectinload(models.Models.color)
+            ),
+            selectinload(models.Phones.model_number)
+        ).filter(models.Phones.id == phone_id)
+    )
+    return final_phone_result.scalars().one()
+
+@app.post("/api/v1/phones/{phone_id}/finish-repair", response_model=schemas.Phone, tags=["Returns"])
+async def finish_phone_repair(
+    phone_id: int, 
+    finish_data: schemas.WarrantyRepairFinish,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Завершает процесс гарантийного ремонта для телефона."""
+    updated_phone = await crud.finish_warranty_repair(
+        db=db, 
+        phone_id=phone_id, 
+        finish_data=finish_data,
+        user_id=current_user.id
+    )
+
+    # --- НАЧАЛО ИСПРАВЛЕНИЯ: Добавляем блок форматирования ответа ---
+    model_detail = None
+    if updated_phone.model:
+        model_name_base = updated_phone.model.model_name.name if updated_phone.model.model_name else ""
+        storage_display = models.format_storage_for_display(updated_phone.model.storage.storage) if updated_phone.model.storage else ""
+        color_name = updated_phone.model.color.color_name if updated_phone.model.color else ""
+        full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+        model_detail = schemas.ModelDetail(
+            id=updated_phone.model.id,
+            name=full_display_name,
+            base_name=model_name_base,
+            model_name_id=updated_phone.model.model_name_id,
+            storage_id=updated_phone.model.storage_id,
+            color_id=updated_phone.model.color_id
+        )
+
+    return schemas.Phone(
+        id=updated_phone.id,
+        serial_number=updated_phone.serial_number,
+        technical_status=updated_phone.technical_status.value if updated_phone.technical_status else None,
+        commercial_status=updated_phone.commercial_status.value if updated_phone.commercial_status else None,
+        added_date=updated_phone.added_date,
+        model=model_detail,
+        model_number=updated_phone.model_number
+    )
+
+
+@app.post("/api/v1/phones/{phone_id}/replace-from-supplier", response_model=schemas.Phone, tags=["Returns"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_inspections"))])
+async def replace_phone_from_supplier(
+    phone_id: int,
+    replacement_data: schemas.SupplierReplacementCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Обрабатывает замену бракованного телефона на новый от поставщика."""
+    
+    new_phone = await crud.process_supplier_replacement(
+        db=db,
+        original_phone_id=phone_id,
+        new_phone_data=replacement_data,
+        user_id=current_user.id
+    )
+
+    # Форматируем ответ, чтобы вернуть полную информацию о НОВОМ телефоне
+    await db.refresh(
+        new_phone, 
+        attribute_names=["model", "model_number"]
+    )
+    
+    model_detail = None
+    if new_phone.model:
+        model_name_base = new_phone.model.model_name.name if new_phone.model.model_name else ""
+        storage_display = models.format_storage_for_display(new_phone.model.storage.storage) if new_phone.model.storage else ""
+        color_name = new_phone.model.color.color_name if new_phone.model.color else ""
+        full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+        model_detail = schemas.ModelDetail(
+            id=new_phone.model.id,
+            name=full_display_name,
+            base_name=model_name_base,
+            model_name_id=new_phone.model.model_name_id,
+            storage_id=new_phone.model.storage_id,
+            color_id=new_phone.model.color_id
+        )
+
+    return schemas.Phone(
+        id=new_phone.id,
+        serial_number=new_phone.serial_number,
+        technical_status=new_phone.technical_status.value if new_phone.technical_status else None,
+        commercial_status=new_phone.commercial_status.value if new_phone.commercial_status else None,
+        added_date=new_phone.added_date,
+        model=model_detail,
+        model_number=new_phone.model_number
+    )
+
+@app.get("/api/v1/models/{model_id}/alternatives", response_model=List[schemas.ModelDetail], tags=["Models"])
+async def read_model_alternatives(model_id: int, db: AsyncSession = Depends(get_db)):
+    """Получает список моделей-альтернатив (другие цвета той же модели)."""
+    
+    alternative_models = await crud.get_replacement_model_options(db=db, model_id=model_id)
+    
+    # Форматируем ответ
+    response_list = []
+    for model in alternative_models:
+        if model.model_name and model.storage and model.color:
+            name = f"{model.model_name.name} {models.format_storage_for_display(model.storage.storage)} {model.color.color_name}"
+            response_list.append(schemas.ModelDetail(
+                id=model.id,
+                name=name,
+                base_name=model.model_name.name,
+                model_name_id=model.model_name_id,
+                storage_id=model.storage_id,
+                color_id=model.color_id
+            ))
+    return response_list
+
+
+@app.get("/api/v1/phones/{phone_id}/replacements", response_model=List[schemas.PhoneForExchange], tags=["Returns"])
+async def get_replacement_phones(phone_id: int, db: AsyncSession = Depends(get_db)):
+    """Получает список телефонов для обмена (та же модель, на складе)."""
+    phone = await db.get(models.Phones, phone_id)
+    if not phone:
+        raise HTTPException(status_code=404, detail="Телефон не найден")
+
+    replacement_phones = await crud.get_replacement_options(db=db, model_id=phone.model_id)
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Формируем полный ответ ---
+    response_list = []
+    for p in replacement_phones:
+        full_name = "Модель не определена"
+        if p.model:
+            model_name_base = p.model.model_name.name if p.model.model_name else ""
+            storage_display = models.format_storage_for_display(p.model.storage.storage) if p.model.storage else ""
+            color_name = p.model.color.color_name if p.model.color else ""
+            full_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+
+        response_list.append(
+            schemas.PhoneForExchange(
+                id=p.id,
+                serial_number=p.serial_number,
+                full_model_name=full_name
+            )
+        )
+    return response_list
+
+
+
+@app.post("/api/v1/phones/{phone_id}/exchange", response_model=schemas.Phone, tags=["Returns"])
+async def create_exchange(
+    phone_id: int,
+    exchange_data: schemas.ExchangeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user) # Added for consistency
+):
+    """Выполняет обмен телефона."""
+    updated_phone = await crud.process_phone_exchange(
+        db=db,
+        original_phone_id=phone_id,
+        replacement_phone_id=exchange_data.replacement_phone_id,
+        user_id=current_user.id
+    )
+
+    # --- ADD THIS FORMATTING BLOCK ---
+    phone_dict = updated_phone.__dict__
+    if updated_phone.model:
+        model_name_base = updated_phone.model.model_name.name if updated_phone.model.model_name else ""
+        storage_display = models.format_storage_for_display(updated_phone.model.storage.storage) if updated_phone.model.storage else ""
+        color_name = updated_phone.model.color.color_name if updated_phone.model.color else ""
+        full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+        phone_dict['model'] = schemas.ModelDetail(
+            id=updated_phone.model.id,
+            name=full_display_name,
+            base_name=model_name_base,
+            model_name_id=updated_phone.model.model_name_id,
+            storage_id=updated_phone.model.storage_id,
+            color_id=updated_phone.model.color_id
+        )
+    
+    if 'technical_status' in phone_dict and hasattr(phone_dict['technical_status'], 'value'):
+        phone_dict['technical_status'] = phone_dict['technical_status'].value
+    if 'commercial_status' in phone_dict and hasattr(phone_dict['commercial_status'], 'value'):
+        phone_dict['commercial_status'] = phone_dict['commercial_status'].value
+    
+    return schemas.Phone.model_validate(phone_dict, from_attributes=True)
+
+@app.get("/api/v1/phones/{phone_id}", response_model=schemas.Phone, tags=["Phones"])
+async def read_phone_by_id(
+    phone_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """
+    Получает информацию о конкретном телефоне по его ID.
+    """
+    phone = await db.get(models.Phones, phone_id, options=[
+        selectinload(models.Phones.model).selectinload(models.Models.model_name),
+        selectinload(models.Phones.model).selectinload(models.Models.storage),
+        selectinload(models.Phones.model).selectinload(models.Models.color),
+        selectinload(models.Phones.model_number)
+    ])
+    if not phone:
+        raise HTTPException(status_code=404, detail="Телефон не найден")
+
+    # Форматируем ответ, как в других эндпоинтах
+    phone_dict = {
+        "id": phone.id,
+        "serial_number": phone.serial_number,
+        "technical_status": phone.technical_status.value if phone.technical_status else None,
+        "commercial_status": phone.commercial_status.value if phone.commercial_status else None,
+        "added_date": phone.added_date,
+        "model": None,
+        "model_number": phone.model_number
+    }
+
+    if phone.model:
+        model_name_base = phone.model.model_name.name if phone.model.model_name else ""
+        storage_display = models.format_storage_for_display(phone.model.storage.storage) if phone.model.storage else ""
+        color_name = phone.model.color.color_name if phone.model.color else ""
+
+        full_name_parts = [part for part in [model_name_base, storage_display, color_name] if part]
+        full_display_name = " ".join(full_name_parts)
+
+        phone_dict['model'] = schemas.ModelDetail(
+            id=phone.model.id,
+            name=full_display_name,
+            base_name=model_name_base,
+            model_name_id=phone.model.model_name_id,
+            storage_id=phone.model.storage_id,
+            color_id=phone.model.color_id
+        )
+
+    return schemas.Phone.model_validate(phone_dict)
+
+
+class SalesSummary(BaseModel):
+    sales_count: int
+    total_revenue: Decimal
+    cash_in_register: Decimal
+
+@app.get("/api/v1/dashboard/sales-summary", response_model=SalesSummary, tags=["Dashboard"], dependencies=[Depends(security.require_permission("perform_sales"))])
+async def get_dashboard_sales_summary(
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Возвращает сводку по продажам для текущего пользователя за день."""
+    return await crud.get_sales_summary_for_user(db=db, user_id=current_user.id)
+
+@app.get("/api/v1/dashboard/ready-for-sale", response_model=List[schemas.Phone], tags=["Dashboard"], dependencies=[Depends(security.require_permission("perform_sales"))])
+async def get_dashboard_ready_for_sale(db: AsyncSession = Depends(get_db)):
+    """Возвращает последние 5 телефонов на складе."""
+    phones = await crud.get_recent_phones_in_stock(db=db)
+    return [_format_phone_response(p) for p in phones]
+
