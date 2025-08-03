@@ -144,6 +144,7 @@ class Phone(BaseModel):
     model: Optional[ModelDetail] = None
     added_date: Optional[date] = None
     model_number: Optional[ModelNumber] = None
+    storage_location: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -625,3 +626,5 @@ class NoteCreate(BaseModel):
 class NoteUpdate(BaseModel):
     is_completed: bool
 
+class MovePhoneRequest(BaseModel):
+    new_location: str

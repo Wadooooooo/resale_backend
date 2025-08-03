@@ -1899,3 +1899,65 @@ async def update_note_status(db: AsyncSession, note_id: int, completed: bool, us
     return note
 
 
+async def get_all_phones_in_stock_detailed(db: AsyncSession):
+    """Получает детальный список всех телефонов со статусом 'НА_СКЛАДЕ' с их местоположением."""
+    query = (
+        select(models.Phones, models.Warehouse.storage_location)
+        .join(models.Warehouse, (models.Phones.id == models.Warehouse.product_id) & (models.Warehouse.product_type_id == 1))
+        .options(
+            selectinload(models.Phones.model).selectinload(models.Models.model_name),
+            selectinload(models.Phones.model).selectinload(models.Models.storage),
+            selectinload(models.Phones.model).selectinload(models.Models.color),
+            selectinload(models.Phones.model_number)
+        )
+        .filter(models.Phones.commercial_status == models.CommerceStatus.НА_СКЛАДЕ)
+        .order_by(models.Phones.id.desc())
+    )
+    result = await db.execute(query)
+    
+    phones_with_location = []
+    for phone, location in result.all():
+        phone.storage_location = location.value if location else None # Добавляем атрибут к объекту
+        phones_with_location.append(phone)
+        
+    return phones_with_location
+
+async def move_phone_location(db: AsyncSession, phone_id: int, new_location: models.EnumShop, user_id: int):
+    """Перемещает телефон между складом и витриной."""
+    warehouse_entry_result = await db.execute(
+        select(models.Warehouse).filter_by(product_id=phone_id, product_type_id=1)
+    )
+    warehouse_entry = warehouse_entry_result.scalars().first()
+
+    if not warehouse_entry:
+        raise HTTPException(status_code=404, detail="Запись о складе для этого телефона не найдена.")
+
+    old_location = warehouse_entry.storage_location.value if warehouse_entry.storage_location else "неизвестно"
+    warehouse_entry.storage_location = new_location
+
+    log_entry = models.PhoneMovementLog(
+        phone_id=phone_id,
+        user_id=user_id,
+        event_type=models.PhoneEventType.ПЕРЕМЕЩЕНИЕ,
+        details=f"Перемещен с '{old_location}' на '{new_location.value}'."
+    )
+    db.add(log_entry)
+    await db.commit()
+    
+    # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+    # Запрашиваем телефон заново со всеми связанными данными, необходимыми для форматирования
+    final_phone_result = await db.execute(
+        select(models.Phones).options(
+            selectinload(models.Phones.model).options(
+                selectinload(models.Models.model_name),
+                selectinload(models.Models.storage),
+                selectinload(models.Models.color)
+            ),
+            selectinload(models.Phones.model_number)
+        ).filter(models.Phones.id == phone_id)
+    )
+    updated_phone = final_phone_result.scalars().one()
+    # Добавляем местоположение вручную, так как оно из другой таблицы
+    updated_phone.storage_location = new_location.value
+    return updated_phone
+

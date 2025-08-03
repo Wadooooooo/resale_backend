@@ -217,6 +217,8 @@ def _format_phone_response(phone: models.Phones) -> schemas.Phone:
             color_id=phone.model.color_id
         )
 
+    location = getattr(phone, 'storage_location', None)
+    
     return schemas.Phone(
         id=phone.id,
         serial_number=phone.serial_number,
@@ -224,7 +226,9 @@ def _format_phone_response(phone: models.Phones) -> schemas.Phone:
         commercial_status=phone.commercial_status.value if phone.commercial_status else None,
         added_date=phone.added_date,
         model=model_detail,
-        model_number=phone.model_number
+        model_number=phone.model_number,
+        storage_location=location
+        
     )
 
 async def _format_sale_response(sale: models.Sales, db: AsyncSession) -> schemas.SaleResponse:
@@ -747,123 +751,80 @@ async def read_phones(
 
 
 
-@app.get("/api/v1/phones/history/{serial_number}", response_model=schemas.PhoneHistoryResponse, tags=["Phones"])
+@app.get(
+    "/api/v1/phones/history/{serial_number}",
+    response_model=schemas.PhoneHistoryResponse,
+    tags=["Phones"],
+    dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_sales"))]
+)
 async def get_phone_history(
     serial_number: str,
     db: AsyncSession = Depends(get_db),
-    current_user: schemas.User = Depends(security.get_current_active_user)
+    current_user: models.Users = Depends(security.get_current_active_user)
 ):
-    """Получает полную историю телефона по его серийному номеру, включая все логи."""
+    """Получает историю телефона. Доступно только менеджерам и продавцам."""
     
     phone = await crud.get_phone_history_by_serial(db=db, serial_number=serial_number)
     
     if not phone:
         raise HTTPException(status_code=404, detail="Телефон не найден")
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: БЛОК ПРОВЕРКИ ПРАВ И ФИЛЬТРАЦИИ ДАННЫХ ---
-    
-    # Проверяем права пользователя
-    is_salesperson = security.user_has_permission(current_user, "perform_sales")
+    # --- ЛОГИКА ФИЛЬТРАЦИИ ДАННЫХ В ЗАВИСИМОСТИ ОТ РОЛИ ---
+
+    # 1. Определяем роли пользователя
     is_manager = security.user_has_permission(current_user, "manage_inventory")
+    is_salesperson = security.user_has_permission(current_user, "perform_sales")
 
+    # 2. Сначала собираем всю возможную информацию "по-умолчанию"
     logs_to_display = phone.movement_logs
+    
     purchase_info = None
-    inspections_list = []
-
-    # Если пользователь - продавец, но не менеджер, фильтруем данные
-    if is_salesperson and not is_manager:
-        try:
-            # Находим индекс первого события "Принят на склад"
-            stock_acceptance_index = next(
-                i for i, log in enumerate(phone.movement_logs) 
-                if log.event_type == models.PhoneEventType.ПРИНЯТ_НА_СКЛАД
-            )
-            # Показываем логи только начиная с этого события
-            logs_to_display = phone.movement_logs[stock_acceptance_index:]
-        except StopIteration:
-            # Если телефон никогда не был на складе, продавец не увидит его историю
-            logs_to_display = []
-        
-        # Информация о закупке и инспекциях для продавца скрыта
-        purchase_info = None
-        inspections_list = []
-
-    else: # Для менеджеров и администраторов оставляем полную историю
-        if phone.supplier_order:
-            purchase_info = schemas.PhoneHistoryPurchase(
-                supplier_order_id=phone.supplier_order.id,
-                order_date=phone.supplier_order.order_date,
-                purchase_price=phone.purchase_price,
-                supplier_name=phone.supplier_order.supplier.name if phone.supplier_order.supplier else "Неизвестно"
-            )
-
-        for insp in phone.device_inspections:
-            inspection_details = schemas.PhoneHistoryInspection(
-                inspection_date=insp.inspection_date,
-                inspected_by=insp.user.name if insp.user else "Неизвестно",
-                results=[
-                    schemas.PhoneHistoryInspectionResult(
-                        item_name=res.checklist_item.name,
-                        result=res.result,
-                        notes=res.notes
-                    ) for res in insp.inspection_results
-                ],
-                battery_tests=[
-                    schemas.PhoneHistoryBatteryTest(
-                        start_time=bt.start_time,
-                        end_time=bt.end_time,
-                        start_battery_level=bt.start_battery_level,
-                        end_battery_level=bt.end_battery_level,
-                        battery_drain=bt.battery_drain
-                    ) for bt in insp.battery_tests
-                ]
-            )
-            inspections_list.append(inspection_details)
-
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-    # --- НАЧАЛО ИСПРАВЛЕНИЯ: Вручную собираем объект ответа ---
-
-    # 1. Собираем информацию о модели, как мы это делаем в других эндпоинтах
-    model_detail = None
-    if phone.model:
-        model_name_base = phone.model.model_name.name if phone.model.model_name else ""
-        storage_display = models.format_storage_for_display(phone.model.storage.storage) if phone.model.storage else ""
-        color_name = phone.model.color.color_name if phone.model.color else ""
-        full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
-        model_detail = schemas.ModelDetail(
-            id=phone.model.id,
-            name=full_display_name,
-            base_name=model_name_base,
-            model_name_id=phone.model.model_name_id,
-            storage_id=phone.model.storage_id,
-            color_id=phone.model.color_id
+    if phone.supplier_order:
+        purchase_info = schemas.PhoneHistoryPurchase(
+            supplier_order_id=phone.supplier_order.id,
+            order_date=phone.supplier_order.order_date,
+            purchase_price=phone.purchase_price,
+            supplier_name=phone.supplier_order.supplier.name if phone.supplier_order.supplier else "Неизвестно"
         )
 
-    # 2. Собираем остальную информацию (этот код уже был в crud.py, но теперь его место здесь)
-    # purchase_info теперь определяется в блоке с проверкой прав выше
+    inspections_list = []
+    for insp in phone.device_inspections:
+        inspection_details = schemas.PhoneHistoryInspection(
+            inspection_date=insp.inspection_date,
+            inspected_by=insp.user.name if insp.user else "Неизвестно",
+            results=[
+                schemas.PhoneHistoryInspectionResult(
+                    item_name=res.checklist_item.name,
+                    result=res.result,
+                    notes=res.notes
+                ) for res in insp.inspection_results
+            ],
+            battery_tests=[
+                schemas.PhoneHistoryBatteryTest(
+                    start_time=bt.start_time,
+                    end_time=bt.end_time,
+                    start_battery_level=bt.start_battery_level,
+                    end_battery_level=bt.end_battery_level,
+                    battery_drain=bt.battery_drain
+                ) for bt in insp.battery_tests
+            ]
+        )
+        inspections_list.append(inspection_details)
     
-    # 3. Собираем информацию об инспекциях
-    # inspections_list теперь определяется в блоке с проверкой прав выше
-    
-    # 4. Находим информацию о складе и продаже (это требует доп. запросов)
     warehouse_info = None
     sale_info = None
-    
     warehouse_entry_result = await db.execute(
         select(models.Warehouse)
         .options(selectinload(models.Warehouse.shop), selectinload(models.Warehouse.user))
         .filter_by(product_id=phone.id, product_type_id=1)
     )
     warehouse_entry = warehouse_entry_result.scalars().first()
-
     if warehouse_entry:
         warehouse_info = schemas.PhoneHistoryWarehouse(
             added_date=warehouse_entry.added_date,
             shop_name=warehouse_entry.shop.name if warehouse_entry.shop else "Неизвестно",
             accepted_by=warehouse_entry.user.name if warehouse_entry.user else "Неизвестно"
         )
-
         sale_detail_result = await db.execute(
             select(models.SaleDetails)
             .options(selectinload(models.SaleDetails.sale).selectinload(models.Sales.customer))
@@ -880,7 +841,42 @@ async def get_phone_history(
                 customer_number=sale.customer.number if sale.customer else None,
             )
 
-    # 5. Собираем финальный ответ для Pydantic
+    # 3. Применяем фильтры для продавца, если он не является менеджером
+    if is_salesperson and not is_manager:
+        # Определяем события, которые можно показывать продавцу (связанные с клиентами)
+        salesperson_visible_events = {
+            models.PhoneEventType.ПРИНЯТ_НА_СКЛАД,
+            models.PhoneEventType.ПРОДАН,
+            models.PhoneEventType.ВОЗВРАТ_ОТ_КЛИЕНТА,
+            models.PhoneEventType.ОТПРАВЛЕН_В_РЕМОНТ,
+            models.PhoneEventType.ПОЛУЧЕН_ИЗ_РЕМОНТА,
+            models.PhoneEventType.ОБМЕНЕН
+        }
+        # Создаем новый список, содержащий только разрешенные события
+        logs_to_display = [
+            log for log in phone.movement_logs 
+            if log.event_type in salesperson_visible_events
+        ]
+        # Также скрываем от продавца информацию о закупке и технических инспекциях
+        purchase_info = None
+        inspections_list = []
+
+    # 4. Формируем финальный ответ из отфильтрованных данных
+    model_detail = None
+    if phone.model:
+        model_name_base = phone.model.model_name.name if phone.model.model_name else ""
+        storage_display = models.format_storage_for_display(phone.model.storage.storage) if phone.model.storage else ""
+        color_name = phone.model.color.color_name if phone.model.color else ""
+        full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+        model_detail = schemas.ModelDetail(
+            id=phone.model.id,
+            name=full_display_name,
+            base_name=model_name_base,
+            model_name_id=phone.model.model_name_id,
+            storage_id=phone.model.storage_id,
+            color_id=phone.model.color_id
+        )
+        
     return schemas.PhoneHistoryResponse(
         id=phone.id,
         serial_number=phone.serial_number,
@@ -896,10 +892,10 @@ async def get_phone_history(
                 event_type=log.event_type.value.replace('_', ' ').capitalize(),
                 details=log.details,
                 user=log.user
-            ) for log in logs_to_display # <-- Используем отфильтрованные логи
+            ) for log in logs_to_display
         ],
-        purchase_info=purchase_info, # <-- Используем отфильтрованные данные
-        inspections=inspections_list, # <-- Используем отфильтрованные данные
+        purchase_info=purchase_info,
+        inspections=inspections_list,
         warehouse_info=warehouse_info,
         sale_info=sale_info
     )
@@ -1162,11 +1158,11 @@ async def receive_order(
     )
 
 
-@app.get("/api/v1/shops", response_model=List[schemas.Shop], tags=["Warehouse"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+@app.get("/api/v1/shops", response_model=List[schemas.Shop], tags=["Warehouse"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_sales"))])
 async def read_shops(db: AsyncSession = Depends(get_db), current_user: schemas.User = Depends(security.get_current_active_user)):
     return await crud.get_shops(db=db)
 
-@app.get("/api/v1/phones/ready-for-stock", response_model=List[schemas.Phone], tags=["Warehouse"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+@app.get("/api/v1/phones/ready-for-stock", response_model=List[schemas.Phone], tags=["Warehouse"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_sales"))])
 async def read_phones_ready_for_stock(
     db: AsyncSession = Depends(get_db), 
     current_user: schemas.User = Depends(security.get_current_active_user)
@@ -1206,7 +1202,7 @@ async def read_phones_ready_for_stock(
     
     return formatted_phones
 
-@app.post("/api/v1/warehouse/accept-phones", response_model=List[schemas.Phone], tags=["Warehouse"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+@app.post("/api/v1/warehouse/accept-phones", response_model=List[schemas.Phone], tags=["Warehouse"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_sales"))])
 async def accept_phones_to_warehouse_endpoint(
     data: schemas.WarehouseAcceptanceRequest,
     db: AsyncSession = Depends(get_db),
@@ -2031,6 +2027,13 @@ async def read_phones_in_stock(db: AsyncSession = Depends(get_db)):
         )
     return sorted(response_list, key=lambda x: x.full_model_name)
 
+@app.get("/api/v1/phones/stock-details", response_model=List[schemas.Phone], tags=["Warehouse"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_sales"))])
+async def read_all_phones_in_stock_detailed(db: AsyncSession = Depends(get_db)):
+    """Получает детальный список всех телефонов на складе с их местоположением."""
+    phones = await crud.get_all_phones_in_stock_detailed(db=db)
+    # Форматируем ответ с помощью общей функции
+    return [_format_phone_response(p) for p in phones]
+
 
 @app.get("/api/v1/phones/{phone_id}", response_model=schemas.Phone, tags=["Phones"])
 async def read_phone_by_id(
@@ -2128,4 +2131,22 @@ async def update_note(
     return await crud.update_note_status(
         db=db, note_id=note_id, completed=note_update.is_completed, user_id=current_user.id
     )
+
+@app.put("/api/v1/warehouse/move-phone/{phone_id}", response_model=schemas.Phone, tags=["Warehouse"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_sales"))])
+async def move_phone(
+    phone_id: int,
+    request: schemas.MovePhoneRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Перемещает телефон на новое место (СКЛАД или ВИТРИНА)."""
+    try:
+        new_location_enum = models.EnumShop[request.new_location]
+    except KeyError:
+        raise HTTPException(status_code=400, detail="Неверное местоположение. Используйте 'СКЛАД' или 'ВИТРИНА'.")
+    
+    updated_phone = await crud.move_phone_location(
+        db=db, phone_id=phone_id, new_location=new_location_enum, user_id=current_user.id
+    )
+    return _format_phone_response(updated_phone)
 
