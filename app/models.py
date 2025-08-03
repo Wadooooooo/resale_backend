@@ -448,10 +448,14 @@ class Customers(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[Optional[str]] = mapped_column(String(255))
     number: Mapped[Optional[str]] = mapped_column(String(255))
-    
+    source_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("traffic_sources.id"), nullable=True)
+    referrer_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("customers.id"), nullable=True)
+
     # Relationships
     sales: Mapped[List["Sales"]] = relationship("Sales", back_populates="customer")
-
+    source: Mapped[Optional["TrafficSource"]] = relationship("TrafficSource", back_populates="customers")
+    # Связь "сам на себя" для реферальной программы
+    referrer: Mapped[Optional["Customers"]] = relationship("Customers", remote_side=[id], backref="referrals")
 
 class Sales(Base):
     __tablename__ = "sales"
@@ -765,3 +769,15 @@ class PhoneMovementLog(Base):
     phone: Mapped["Phones"] = relationship("Phones", back_populates="movement_logs")
     user: Mapped["Users"] = relationship("Users")
     
+class TrafficSource(Base):
+    __tablename__ = "traffic_sources"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    
+    # Связь с покупателями, которые пришли из этого источника
+    customers: Mapped[List["Customers"]] = relationship(
+        "Customers", 
+        foreign_keys="[Customers.source_id]", # <-- ДОБАВЬТЕ ЭТУ СТРОКУ
+        back_populates="source"
+    )

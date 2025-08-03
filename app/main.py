@@ -186,7 +186,8 @@ async def read_accessories_for_orders(
 
 
 origins = [
-    "http://localhost:5173", # Адрес вашего React-приложения
+    "http://localhost:5173",
+    "http://localhost:5174" # Адрес вашего React-приложения
     # Можно добавить и другие адреса, если понадобится
 ]
 
@@ -225,13 +226,74 @@ def _format_phone_response(phone: models.Phones) -> schemas.Phone:
         model=model_detail,
         model_number=phone.model_number
     )
-# --- Блок для отдачи статических файлов, который нужно УДАЛИТЬ ---
-# app.mount("/static", StaticFiles(directory="static"), name="static")
-# @app.get("/", response_class=HTMLResponse)
-# async def read_root():
-#     with open("static/index.html", "r", encoding="utf-8") as f:
-#         return f.read()
-# --- Конец блока для удаления ---
+
+async def _format_sale_response(sale: models.Sales, db: AsyncSession) -> schemas.SaleResponse:
+    """Вспомогательная функция для форматирования ответа о продаже."""
+    # Собираем ID телефонов и аксессуаров из деталей продажи
+    phone_ids = [
+        detail.warehouse.product_id for detail in sale.sale_details 
+        if detail.warehouse and detail.warehouse.product_type_id == 1
+    ]
+    accessory_ids = [
+        detail.warehouse.product_id for detail in sale.sale_details 
+        if detail.warehouse and detail.warehouse.product_type_id == 2
+    ]
+
+    # Загружаем все нужные телефоны и аксессуары одним запросом для каждого типа
+    phones_map = {}
+    if phone_ids:
+        phones_res = await db.execute(
+            select(models.Phones).options(
+                selectinload(models.Phones.model).options(
+                    selectinload(models.Models.model_name),
+                    selectinload(models.Models.storage),
+                    selectinload(models.Models.color)
+                ),
+                selectinload(models.Phones.model_number)
+            ).filter(models.Phones.id.in_(phone_ids))
+        )
+        phones_map = {p.id: p for p in phones_res.scalars().all()}
+
+    accessories_map = {}
+    if accessory_ids:
+        accessories_res = await db.execute(select(models.Accessories).filter(models.Accessories.id.in_(accessory_ids)))
+        accessories_map = {a.id: a for a in accessories_res.scalars().all()}
+
+    # Собираем финальный ответ
+    response_details = []
+    for detail in sale.sale_details:
+        product_name = "Неизвестный товар"
+        serial_number, model_number = None, None
+
+        if not detail.warehouse: continue
+
+        if detail.warehouse.product_type_id == 1: # Телефон
+            product_obj = phones_map.get(detail.warehouse.product_id)
+            if product_obj:
+                serial_number = product_obj.serial_number
+                model_number = product_obj.model_number.name if product_obj.model_number else None
+                if product_obj.model:
+                    model_name_base = product_obj.model.model_name.name if product_obj.model.model_name else ""
+                    storage_display = models.format_storage_for_display(product_obj.model.storage.storage) if product_obj.model.storage else ""
+                    color_name = product_obj.model.color.color_name if product_obj.model.color else ""
+                    product_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+
+        elif detail.warehouse.product_type_id == 2: # Аксессуар
+            product_obj = accessories_map.get(detail.warehouse.product_id)
+            if product_obj:
+                product_name = product_obj.name
+
+        response_details.append(
+            schemas.SaleDetailResponse(
+                id=detail.id, product_name=product_name, serial_number=serial_number,
+                model_number=model_number, quantity=detail.quantity, unit_price=detail.unit_price
+            )
+        )
+
+    return schemas.SaleResponse(
+        id=sale.id, sale_date=sale.sale_date, customer_id=sale.customer_id,
+        total_amount=sale.total_amount, details=response_details
+    )
 
 # --- Эндпоинты для Движения Денег ---
 
@@ -249,6 +311,93 @@ async def read_counterparties(db: AsyncSession = Depends(get_db), current_user: 
          dependencies=[Depends(security.require_any_permission("manage_cashflow", "perform_sales"))])
 async def read_accounts(db: AsyncSession = Depends(get_db), current_user: schemas.User = Depends(security.get_current_active_user)):
     return await crud.get_accounts(db=db)
+
+@app.get("/api/v1/sales/my-sales", response_model=List[schemas.SaleResponse], tags=["Sales"])
+async def read_my_sales(
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user),
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None
+):
+    """Возвращает список продаж, сделанных текущим пользователем за период (оптимизированная версия)."""
+    # 1. Получаем все продажи одним запросом
+    sales = await crud.get_sales_by_user_id(
+        db=db, user_id=current_user.id, start_date=start_date, end_date=end_date
+    )
+    if not sales:
+        return []
+
+    # 2. Собираем ВСЕ уникальные ID товаров из ВСЕХ продаж
+    all_phone_ids = set()
+    all_accessory_ids = set()
+    for sale in sales:
+        for detail in sale.sale_details:
+            if detail.warehouse:
+                if detail.warehouse.product_type_id == 1:
+                    all_phone_ids.add(detail.warehouse.product_id)
+                elif detail.warehouse.product_type_id == 2:
+                    all_accessory_ids.add(detail.warehouse.product_id)
+
+    # 3. Загружаем все нужные телефоны и аксессуары ОДНИМ запросом для каждого типа
+    phones_map = {}
+    if all_phone_ids:
+        phones_res = await db.execute(
+            select(models.Phones).options(
+                selectinload(models.Phones.model).options(
+                    selectinload(models.Models.model_name),
+                    selectinload(models.Models.storage),
+                    selectinload(models.Models.color)
+                ),
+                selectinload(models.Phones.model_number)
+            ).filter(models.Phones.id.in_(all_phone_ids))
+        )
+        phones_map = {p.id: p for p in phones_res.scalars().all()}
+    
+    accessories_map = {}
+    if all_accessory_ids:
+        accessories_res = await db.execute(select(models.Accessories).filter(models.Accessories.id.in_(all_accessory_ids)))
+        accessories_map = {a.id: a for a in accessories_res.scalars().all()}
+
+    # 4. Теперь собираем финальный ответ, используя уже загруженные данные (без новых запросов к БД)
+    final_response = []
+    for sale in sales:
+        response_details = []
+        for detail in sale.sale_details:
+            product_name = "Неизвестный товар"
+            serial_number, model_number = None, None
+            
+            if not detail.warehouse: continue
+
+            if detail.warehouse.product_type_id == 1: # Телефон
+                product_obj = phones_map.get(detail.warehouse.product_id)
+                if product_obj:
+                    serial_number = product_obj.serial_number
+                    model_number = product_obj.model_number.name if product_obj.model_number else None
+                    if product_obj.model:
+                        model_name_base = product_obj.model.model_name.name if product_obj.model.model_name else ""
+                        storage_display = models.format_storage_for_display(product_obj.model.storage.storage) if product_obj.model.storage else ""
+                        color_name = product_obj.model.color.color_name if product_obj.model.color else ""
+                        product_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+            
+            elif detail.warehouse.product_type_id == 2: # Аксессуар
+                product_obj = accessories_map.get(detail.warehouse.product_id)
+                if product_obj:
+                    product_name = product_obj.name
+
+            response_details.append(
+                schemas.SaleDetailResponse(
+                    id=detail.id, product_name=product_name, serial_number=serial_number,
+                    model_number=model_number, quantity=detail.quantity, unit_price=detail.unit_price
+                )
+            )
+        
+        final_response.append(schemas.SaleResponse(
+            id=sale.id, sale_date=sale.sale_date, customer_id=sale.customer_id,
+            total_amount=sale.total_amount, details=response_details
+        ))
+
+    return final_response
+
 
 @app.post("/api/v1/cashflow", 
           response_model=schemas.CashFlow, 
@@ -1108,9 +1257,57 @@ async def read_all_accessories(
         
     return response_list
 
+@app.post("/api/v1/customers", response_model=schemas.Customer, tags=["Sales"])
+async def create_new_customer(
+    customer_data: schemas.CustomerCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Создает нового покупателя."""
+    return await crud.create_customer(db=db, customer=customer_data)
+
+@app.get("/api/v1/traffic-sources", response_model=List[schemas.TrafficSource], tags=["Sales"])
+async def read_traffic_sources(db: AsyncSession = Depends(get_db)):
+    return await crud.get_traffic_sources(db=db)
+
+@app.post("/api/v1/traffic-sources", response_model=schemas.TrafficSource, tags=["Sales"],
+          dependencies=[Depends(security.require_permission("manage_users"))])
+async def create_new_traffic_source(
+    source_data: schemas.TrafficSourceCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    return await crud.create_traffic_source(db=db, source=source_data)
+
+@app.delete("/api/v1/traffic-sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Sales"],
+            dependencies=[Depends(security.require_permission("manage_users"))])
+async def update_existing_traffic_source(
+    source_id: int,
+    source_data: schemas.TrafficSourceCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    return await crud.update_traffic_source(db=db, source_id=source_id, source_data=source_data)
+
+@app.delete("/api/v1/traffic-sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Sales"])
+async def delete_existing_traffic_source(
+    source_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    await crud.delete_traffic_source(db=db, source_id=source_id)
+    return
+
 @app.get("/api/v1/customers", response_model=List[schemas.Customer], tags=["Sales"])
-async def read_customers(db: AsyncSession = Depends(get_db), current_user: schemas.User = Depends(security.get_current_active_user)):
-    return await crud.get_customers(db=db)
+async def read_customers(db: AsyncSession = Depends(get_db)):
+    customers = await crud.get_customers(db=db)
+    # Форматируем ответ, чтобы включить имя того, кто привел клиента
+    return [
+        schemas.Customer(
+            id=c.id,
+            name=c.name,
+            number=c.number,
+            source=c.source,
+            referrer_name=c.referrer.name if c.referrer else None
+        ) for c in customers
+    ]
 
 @app.get("/api/v1/products-for-sale", response_model=List[schemas.ProductForSale], tags=["Sales"],
          dependencies=[Depends(security.require_permission("perform_sales"))])

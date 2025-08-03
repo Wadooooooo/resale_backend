@@ -305,10 +305,29 @@ class AccessoryCreate(BaseModel):
     barcode: Optional[str] = None
     category_accessory_id: int
 
+class TrafficSource(BaseModel):
+    id: int
+    name: str
+    class Config:
+        from_attributes = True
+
+class TrafficSourceCreate(BaseModel):
+    name: str
+
+
+class CustomerCreate(BaseModel):
+    name: str
+    number: Optional[str] = None
+    source_id: Optional[int] = None
+    referrer_id: Optional[int] = None
+
 class Customer(BaseModel):
     id: int
     name: Optional[str] = None
     number: Optional[str] = None
+    source: Optional[TrafficSource] = None # <-- Изменено
+    # Добавим информацию о том, кто привел клиента, для отображения
+    referrer_name: Optional[str] = None
     class Config:
         from_attributes = True
 

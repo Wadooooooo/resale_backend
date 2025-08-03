@@ -13,7 +13,7 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy import select, or_
 from datetime import date, timedelta, datetime, time
 from sqlalchemy import func
-from typing import List
+from typing import List, Optional
 from . import security
 
 
@@ -669,10 +669,27 @@ async def get_all_accessories(db: AsyncSession):
     )
     return result.scalars().unique().all()
 
+async def get_traffic_sources(db: AsyncSession):
+    """Получает список всех источников трафика."""
+    result = await db.execute(select(models.TrafficSource))
+    return result.scalars().all()
+
+async def create_customer(db: AsyncSession, customer: schemas.CustomerCreate):
+    """Создает нового покупателя в базе данных."""
+    db_customer = models.Customers(**customer.model_dump())
+    db.add(db_customer)
+    await db.commit()
+    await db.refresh(db_customer)
+    return db_customer
 
 async def get_customers(db: AsyncSession):
-    """Получает список всех клиентов."""
-    result = await db.execute(select(models.Customers))
+    """Получает список всех клиентов со связанными данными."""
+    result = await db.execute(
+        select(models.Customers).options(
+            selectinload(models.Customers.source),
+            selectinload(models.Customers.referrer) # Загружаем того, кто привел
+        )
+    )
     return result.scalars().all()
 
 async def get_products_for_sale(db: AsyncSession):
@@ -1776,3 +1793,61 @@ async def package_phones(db: AsyncSession, phone_ids: List[int], user_id: int):
 
     return phones_to_update
 
+async def create_traffic_source(db: AsyncSession, source: schemas.TrafficSourceCreate):
+    """Создает новый источник трафика."""
+    # Проверка на дубликат
+    existing_source = await db.execute(select(models.TrafficSource).filter_by(name=source.name))
+    if existing_source.scalars().first():
+        raise HTTPException(status_code=400, detail="Источник с таким названием уже существует.")
+    
+    db_source = models.TrafficSource(**source.model_dump())
+    db.add(db_source)
+    await db.commit()
+    await db.refresh(db_source)
+    return db_source
+
+async def update_traffic_source(db: AsyncSession, source_id: int, source_data: schemas.TrafficSourceCreate):
+    """Обновляет название источника трафика."""
+    db_source = await db.get(models.TrafficSource, source_id)
+    if not db_source:
+        raise HTTPException(status_code=404, detail="Источник не найден.")
+    
+    db_source.name = source_data.name
+    await db.commit()
+    await db.refresh(db_source)
+    return db_source
+
+async def delete_traffic_source(db: AsyncSession, source_id: int):
+    """Удаляет источник трафика."""
+    db_source = await db.get(models.TrafficSource, source_id)
+    if not db_source:
+        raise HTTPException(status_code=404, detail="Источник не найден.")
+    
+    await db.delete(db_source)
+    await db.commit()
+    return db_source
+
+async def get_sales_by_user_id(db: AsyncSession, user_id: int, start_date: Optional[date] = None, end_date: Optional[date] = None):
+    """
+    Получает все продажи для указанного ID пользователя за определенный период.
+    Оптимизировано для избежания проблемы N+1.
+    """
+    query = (
+        select(models.Sales)
+        .options(
+            selectinload(models.Sales.customer),
+            selectinload(models.Sales.sale_details).selectinload(models.SaleDetails.warehouse)
+        )
+        .filter(models.Sales.user_id == user_id)
+        .order_by(models.Sales.sale_date.desc())
+    )
+
+    if start_date:
+        query = query.filter(models.Sales.sale_date >= start_date)
+    if end_date:
+        # Включаем end_date в диапазон
+        end_date_inclusive = datetime.combine(end_date, time.max)
+        query = query.filter(models.Sales.sale_date <= end_date_inclusive)
+
+    result = await db.execute(query)
+    return result.scalars().all()
