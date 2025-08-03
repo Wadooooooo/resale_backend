@@ -760,6 +760,68 @@ async def get_phone_history(
     if not phone:
         raise HTTPException(status_code=404, detail="Телефон не найден")
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: БЛОК ПРОВЕРКИ ПРАВ И ФИЛЬТРАЦИИ ДАННЫХ ---
+    
+    # Проверяем права пользователя
+    is_salesperson = security.user_has_permission(current_user, "perform_sales")
+    is_manager = security.user_has_permission(current_user, "manage_inventory")
+
+    logs_to_display = phone.movement_logs
+    purchase_info = None
+    inspections_list = []
+
+    # Если пользователь - продавец, но не менеджер, фильтруем данные
+    if is_salesperson and not is_manager:
+        try:
+            # Находим индекс первого события "Принят на склад"
+            stock_acceptance_index = next(
+                i for i, log in enumerate(phone.movement_logs) 
+                if log.event_type == models.PhoneEventType.ПРИНЯТ_НА_СКЛАД
+            )
+            # Показываем логи только начиная с этого события
+            logs_to_display = phone.movement_logs[stock_acceptance_index:]
+        except StopIteration:
+            # Если телефон никогда не был на складе, продавец не увидит его историю
+            logs_to_display = []
+        
+        # Информация о закупке и инспекциях для продавца скрыта
+        purchase_info = None
+        inspections_list = []
+
+    else: # Для менеджеров и администраторов оставляем полную историю
+        if phone.supplier_order:
+            purchase_info = schemas.PhoneHistoryPurchase(
+                supplier_order_id=phone.supplier_order.id,
+                order_date=phone.supplier_order.order_date,
+                purchase_price=phone.purchase_price,
+                supplier_name=phone.supplier_order.supplier.name if phone.supplier_order.supplier else "Неизвестно"
+            )
+
+        for insp in phone.device_inspections:
+            inspection_details = schemas.PhoneHistoryInspection(
+                inspection_date=insp.inspection_date,
+                inspected_by=insp.user.name if insp.user else "Неизвестно",
+                results=[
+                    schemas.PhoneHistoryInspectionResult(
+                        item_name=res.checklist_item.name,
+                        result=res.result,
+                        notes=res.notes
+                    ) for res in insp.inspection_results
+                ],
+                battery_tests=[
+                    schemas.PhoneHistoryBatteryTest(
+                        start_time=bt.start_time,
+                        end_time=bt.end_time,
+                        start_battery_level=bt.start_battery_level,
+                        end_battery_level=bt.end_battery_level,
+                        battery_drain=bt.battery_drain
+                    ) for bt in insp.battery_tests
+                ]
+            )
+            inspections_list.append(inspection_details)
+
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     # --- НАЧАЛО ИСПРАВЛЕНИЯ: Вручную собираем объект ответа ---
 
     # 1. Собираем информацию о модели, как мы это делаем в других эндпоинтах
@@ -779,40 +841,11 @@ async def get_phone_history(
         )
 
     # 2. Собираем остальную информацию (этот код уже был в crud.py, но теперь его место здесь)
-    purchase_info = None
-    if phone.supplier_order:
-        purchase_info = schemas.PhoneHistoryPurchase(
-            supplier_order_id=phone.supplier_order.id,
-            order_date=phone.supplier_order.order_date,
-            purchase_price=phone.purchase_price,
-            supplier_name=phone.supplier_order.supplier.name if phone.supplier_order.supplier else "Неизвестно"
-        )
-
+    # purchase_info теперь определяется в блоке с проверкой прав выше
+    
     # 3. Собираем информацию об инспекциях
-    inspections_list = []
-    for insp in phone.device_inspections:
-        inspection_details = schemas.PhoneHistoryInspection(
-            inspection_date=insp.inspection_date,
-            inspected_by=insp.user.name if insp.user else "Неизвестно",
-            results=[
-                schemas.PhoneHistoryInspectionResult(
-                    item_name=res.checklist_item.name,
-                    result=res.result,
-                    notes=res.notes
-                ) for res in insp.inspection_results
-            ],
-            battery_tests=[
-                schemas.PhoneHistoryBatteryTest(
-                    start_time=bt.start_time,
-                    end_time=bt.end_time,
-                    start_battery_level=bt.start_battery_level,
-                    end_battery_level=bt.end_battery_level,
-                    battery_drain=bt.battery_drain
-                ) for bt in insp.battery_tests
-            ]
-        )
-        inspections_list.append(inspection_details)
-
+    # inspections_list теперь определяется в блоке с проверкой прав выше
+    
     # 4. Находим информацию о складе и продаже (это требует доп. запросов)
     warehouse_info = None
     sale_info = None
@@ -863,10 +896,10 @@ async def get_phone_history(
                 event_type=log.event_type.value.replace('_', ' ').capitalize(),
                 details=log.details,
                 user=log.user
-            ) for log in phone.movement_logs
+            ) for log in logs_to_display # <-- Используем отфильтрованные логи
         ],
-        purchase_info=purchase_info,
-        inspections=inspections_list,
+        purchase_info=purchase_info, # <-- Используем отфильтрованные данные
+        inspections=inspections_list, # <-- Используем отфильтрованные данные
         warehouse_info=warehouse_info,
         sale_info=sale_info
     )
