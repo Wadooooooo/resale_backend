@@ -1659,3 +1659,51 @@ async def get_recent_phones_in_stock(db: AsyncSession):
     result = await db.execute(query)
     return result.scalars().all()
 
+async def get_grouped_phones_in_stock(db: AsyncSession):
+    """
+    Получает сгруппированный список моделей телефонов на складе,
+    считая их количество.
+    """
+    # Шаг 1: Группируем телефоны по model_id и считаем количество
+    group_query = (
+        select(
+            models.Phones.model_id,
+            func.count(models.Phones.id).label("quantity")
+        )
+        .where(
+            models.Phones.commercial_status == models.CommerceStatus.НА_СКЛАДЕ,
+            models.Phones.model_id.is_not(None)
+        )
+        .group_by(models.Phones.model_id)
+    )
+    grouped_result = await db.execute(group_query)
+    grouped_phones = grouped_result.all()
+
+    if not grouped_phones:
+        return []
+
+    # Шаг 2: Извлекаем все model_id для следующего запроса
+    model_ids = [item.model_id for item in grouped_phones]
+    
+    # Шаг 3: Получаем полную информацию для этих моделей
+    models_query = (
+        select(models.Models)
+        .options(
+            selectinload(models.Models.model_name),
+            selectinload(models.Models.storage),
+            selectinload(models.Models.color),
+            selectinload(models.Models.retail_prices_phones)
+        )
+        .where(models.Models.id.in_(model_ids))
+    )
+    models_result = await db.execute(models_query)
+    models_map = {m.id: m for m in models_result.scalars().all()}
+    
+    # Шаг 4: Собираем финальный результат
+    final_result = []
+    for model_id, quantity in grouped_phones:
+        model_obj = models_map.get(model_id)
+        if model_obj:
+            final_result.append({"model": model_obj, "quantity": quantity})
+
+    return final_result

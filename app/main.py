@@ -1,14 +1,16 @@
 # app/main.py 
-
+print("="*20, "ФАЙЛ MAIN.PY УСПЕШНО ЗАГРУЖЕН", "="*20)
 from . import security
 
+from fastapi.exceptions import RequestValidationError
 from sqlalchemy import text
 from datetime import timedelta, date, datetime
 from typing import List, Optional
 from pydantic import BaseModel
 from decimal import Decimal
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
@@ -17,7 +19,7 @@ from .models import format_enum_value_for_display
 
 # Удалить этот импорт, так как используется AsyncSession
 # from sqlalchemy.orm import Session 
-
+from pydantic import ValidationError
 from . import crud, schemas, security, models
 from .database import get_db
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,7 +30,27 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="resale shop API")
 
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # Логируем детальную информацию об ошибке в ваш терминал
+    print("="*50)
+    print("!!! ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ПОЙМАЛ ОШИБКУ ВАЛИДАЦИИ 422 !!!")
+    print(f"URL запроса: {request.url}")
+    
+    # exc.errors() - это самое важное, здесь Pydantic подробно описывает,
+    # какое поле и почему не прошло валидацию.
+    print(f"Детали ошибки: {exc.errors()}")
+    print("="*50)
+    
+    # Возвращаем стандартный JSON-ответ клиенту
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": exc.errors()},
+    )
+
 # --- Эндпоинты для Инспекции ---
+
 
 
 @app.get("/api/v1/model-numbers/search", response_model=List[schemas.ModelNumber], tags=["Inspections"], dependencies=[Depends(security.require_permission("perform_inspections"))])
@@ -1733,6 +1755,38 @@ async def create_exchange(
     
     return schemas.Phone.model_validate(phone_dict, from_attributes=True)
 
+@app.get("/api/v1/phones/in-stock", response_model=List[schemas.GroupedPhoneInStock], tags=["Phones"])
+async def read_phones_in_stock(db: AsyncSession = Depends(get_db)):
+    """Получает сгруппированный список телефонов на складе."""
+    grouped_phones_data = await crud.get_grouped_phones_in_stock(db=db)
+    
+    response_list = []
+    for item in grouped_phones_data:
+        phone_model = item["model"]
+        quantity = item["quantity"]
+
+        model_name_base = phone_model.model_name.name if phone_model.model_name else ""
+        storage_display = models.format_storage_for_display(phone_model.storage.storage) if phone_model.storage else ""
+        color_name = phone_model.color.color_name if phone_model.color else ""
+        full_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+
+        latest_price = None
+        if phone_model.retail_prices_phones:
+            latest_price_entry = sorted(phone_model.retail_prices_phones, key=lambda p: p.date, reverse=True)[0]
+            latest_price = latest_price_entry.price
+
+        response_list.append(
+            schemas.GroupedPhoneInStock(
+                model_id=phone_model.id,
+                full_model_name=full_name,
+                price=latest_price,
+                image_url=phone_model.image_url,
+                quantity=quantity
+            )
+        )
+    return sorted(response_list, key=lambda x: x.full_model_name)
+
+
 @app.get("/api/v1/phones/{phone_id}", response_model=schemas.Phone, tags=["Phones"])
 async def read_phone_by_id(
     phone_id: int,
@@ -1800,4 +1854,7 @@ async def get_dashboard_ready_for_sale(db: AsyncSession = Depends(get_db)):
     """Возвращает последние 5 телефонов на складе."""
     phones = await crud.get_recent_phones_in_stock(db=db)
     return [_format_phone_response(p) for p in phones]
+
+
+
 

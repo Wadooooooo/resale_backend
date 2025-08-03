@@ -154,6 +154,27 @@ class PhoneCreate(BaseModel):
     technical_status: Optional[TechStatus] = None
     commercial_status: Optional[CommerceStatus] = None
 
+class PhoneInStock(BaseModel):
+    id: int
+    serial_number: Optional[str] = None
+    full_model_name: str
+    price: Optional[float] = None
+    image_url: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class GroupedPhoneInStock(BaseModel):
+    model_id: int
+    full_model_name: str
+    price: Optional[float] = None
+    image_url: Optional[str] = None
+    quantity: int
+
+    class Config:
+        from_attributes = True
+
+
 
 # --- Схемы для Поставщиков ---
 class SupplierBase(BaseModel):
@@ -558,4 +579,5 @@ class EmployeeCreate(UserBase):
     password: str
     role_id: int
     active: bool = True
+
 

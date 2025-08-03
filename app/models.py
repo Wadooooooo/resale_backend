@@ -158,6 +158,7 @@ class Models(Base):
     model_name_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("model_name.id"))
     storage_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("storage.id"))
     color_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("colors.id"))
+    image_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     
     model_name: Mapped[Optional["ModelName"]] = relationship("ModelName", back_populates="models")
     storage: Mapped[Optional["Storage"]] = relationship("Storage", back_populates="models")
