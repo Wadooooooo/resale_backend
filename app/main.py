@@ -1,5 +1,5 @@
 # app/main.py 
-print("="*20, "ФАЙЛ MAIN.PY УСПЕШНО ЗАГРУЖЕН", "="*20)
+
 from . import security
 
 from fastapi.exceptions import RequestValidationError
@@ -131,6 +131,20 @@ async def add_battery_test_endpoint(
         )
         
     return schemas.Phone.model_validate(phone_dict, from_attributes=True)
+
+@app.get("/api/v1/phones/ready-for-packaging", response_model=List[schemas.Phone], tags=["Inspections"])
+async def read_phones_for_packaging(db: AsyncSession = Depends(get_db)):
+    phones = await crud.get_phones_ready_for_packaging(db=db)
+    return [_format_phone_response(p) for p in phones]
+
+@app.post("/api/v1/phones/package", response_model=List[schemas.Phone], tags=["Inspections"])
+async def package_phones_endpoint(
+    phone_ids: List[int],
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    updated_phones = await crud.package_phones(db=db, phone_ids=phone_ids, user_id=current_user.id)
+    return [_format_phone_response(p) for p in updated_phones]
 
 
 # Эндпоинт для получения списка телефонов, ожидающих тест аккумулятора

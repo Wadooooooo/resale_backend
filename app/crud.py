@@ -159,9 +159,13 @@ async def create_initial_inspection(db: AsyncSession, phone_id: int, inspection_
 
     final_phone_result = await db.execute(
         select(models.Phones).options(
-            selectinload(models.Phones.model).selectinload(models.Models.model_name),
-            selectinload(models.Phones.model).selectinload(models.Models.storage),
-            selectinload(models.Phones.model).selectinload(models.Models.color)
+            selectinload(models.Phones.model).options(
+                selectinload(models.Models.model_name),
+                selectinload(models.Models.storage),
+                selectinload(models.Models.color)
+            ),
+            # VVV ADD THIS LINE VVV
+            selectinload(models.Phones.model_number)
         ).filter(models.Phones.id == phone_id)
     )
     return final_phone_result.scalars().one()
@@ -206,13 +210,13 @@ async def add_battery_test_results(db: AsyncSession, inspection_id: int, battery
     )
     db.add(new_battery_test)
 
-    inspection.phone.technical_status = models.TechStatus.УПАКОВАН
+    inspection.phone.technical_status = models.TechStatus.НА_УПАКОВКЕ
 
     log_entry = models.PhoneMovementLog(
         phone_id=inspection.phone.id,
         user_id=user_id,
         event_type=models.PhoneEventType.ИНСПЕКЦИЯ_ПРОЙДЕНА,
-        details=f"Тест АКБ пройден. Расход: {f'{drain_rate:.2f}' if drain_rate else 'N/A'} %/час. Статус изменен на 'Упакован'."
+        details=f"Тест АКБ пройден. Расход: {f'{drain_rate:.2f}' if drain_rate else 'N/A'} %/час. Статус изменен на 'На упаковке'."
     )
     db.add(log_entry)
     
@@ -578,9 +582,22 @@ async def get_shops(db: AsyncSession):
     return result.scalars().all()
 
 async def get_phones_ready_for_stock(db: AsyncSession):
-    """Получает все телефоны со статусом 'УПАКОВАН'."""
+    """Получает все телефоны со статусом 'УПАКОВАН', отсортированные по времени упаковки."""
+    # Создаем подзапрос для поиска последнего лога об упаковке для каждого телефона
+    latest_log_subquery = (
+        select(
+            models.PhoneMovementLog.phone_id,
+            func.max(models.PhoneMovementLog.timestamp).label("max_timestamp")
+        )
+        .filter(models.PhoneMovementLog.details == "Телефон упакован и готов к приемке на склад.")
+        .group_by(models.PhoneMovementLog.phone_id)
+        .subquery()
+    )
+
     query = (
         select(models.Phones)
+        # Используем LEFT JOIN, чтобы не терять телефоны без логов
+        .outerjoin(latest_log_subquery, models.Phones.id == latest_log_subquery.c.phone_id)
         .options(
             selectinload(models.Phones.model).selectinload(models.Models.model_name),
             selectinload(models.Phones.model).selectinload(models.Models.storage),
@@ -588,9 +605,11 @@ async def get_phones_ready_for_stock(db: AsyncSession):
         )
         .filter(models.Phones.technical_status == models.TechStatus.УПАКОВАН)
         .filter(models.Phones.commercial_status == models.CommerceStatus.НЕ_ГОТОВ_К_ПРОДАЖЕ)
+        # Сортируем по времени из подзапроса, помещая телефоны без логов в конец
+        .order_by(latest_log_subquery.c.max_timestamp.desc().nulls_last(), models.Phones.id.desc())
     )
     result = await db.execute(query)
-    return result.scalars().all()
+    return result.scalars().unique().all()
 
 async def accept_phones_to_warehouse(db: AsyncSession, data: schemas.WarehouseAcceptanceRequest, user_id: int):
     """Перемещает телефоны на склад и обновляет их статус."""
@@ -1707,3 +1726,53 @@ async def get_grouped_phones_in_stock(db: AsyncSession):
             final_result.append({"model": model_obj, "quantity": quantity})
 
     return final_result
+
+async def get_phones_ready_for_packaging(db: AsyncSession):
+    """Получает все телефоны со статусом 'НА_УПАКОВКЕ'."""
+    query = (
+        select(models.Phones)
+        .options(
+            selectinload(models.Phones.model).selectinload(models.Models.model_name),
+            selectinload(models.Phones.model).selectinload(models.Models.storage),
+            selectinload(models.Phones.model).selectinload(models.Models.color),
+            selectinload(models.Phones.model_number)
+        )
+        .filter(models.Phones.technical_status == models.TechStatus.НА_УПАКОВКЕ)
+    )
+    result = await db.execute(query)
+    return result.scalars().all()
+
+async def package_phones(db: AsyncSession, phone_ids: List[int], user_id: int):
+    """Меняет статус телефонов на 'УПАКОВАН' и создает лог."""
+    # VVV НАЧНИТЕ ИЗМЕНЕНИЯ ЗДЕСЬ VVV
+    result = await db.execute(
+        select(models.Phones)
+        .options(
+            selectinload(models.Phones.model).options(
+                selectinload(models.Models.model_name),
+                selectinload(models.Models.storage),
+                selectinload(models.Models.color)
+            ),
+            selectinload(models.Phones.model_number)
+        )
+        .filter(models.Phones.id.in_(phone_ids))
+    )
+    # ^^^ ЗАКОНЧИТЕ ИЗМЕНЕНИЯ ЗДЕСЬ ^^^
+    phones_to_update = result.scalars().all()
+
+    for phone in phones_to_update:
+        phone.technical_status = models.TechStatus.УПАКОВАН
+        log_entry = models.PhoneMovementLog(
+            phone_id=phone.id,
+            user_id=user_id,
+            event_type=models.PhoneEventType.ИНСПЕКЦИЯ_ПРОЙДЕНА,
+            details="Телефон упакован и готов к приемке на склад."
+        )
+        db.add(log_entry)
+
+    await db.commit()
+    for phone in phones_to_update:
+        await db.refresh(phone, attribute_names=['model', 'model_number'])
+
+    return phones_to_update
+
