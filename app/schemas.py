@@ -600,3 +600,28 @@ class EmployeeCreate(UserBase):
     active: bool = True
 
 
+class NoteUser(BaseModel):
+    id: int
+    username: str
+
+    class Config:
+        from_attributes = True
+
+class Note(BaseModel):
+    id: int
+    content: str
+    is_completed: bool
+    created_at: datetime
+    created_by: NoteUser
+    completed_at: Optional[datetime] = None
+    completed_by: Optional[NoteUser] = None
+
+    class Config:
+        from_attributes = True
+
+class NoteCreate(BaseModel):
+    content: str
+
+class NoteUpdate(BaseModel):
+    is_completed: bool
+

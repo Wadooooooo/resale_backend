@@ -572,7 +572,25 @@ class WarrantyRepair(Base):
     # Отношения для удобного доступа
     phone: Mapped["Phones"] = relationship("Phones")
     user: Mapped["Users"] = relationship("Users")
+
+
+class Notes(Base):
+    __tablename__ = "notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    is_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    created_by_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
+    
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    completed_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
+
+    # Связи
+    created_by: Mapped["Users"] = relationship("Users", foreign_keys=[created_by_user_id])
+    completed_by: Mapped[Optional["Users"]] = relationship("Users", foreign_keys=[completed_by_user_id])
+
 # Вспомогательные функции для работы с полиморфными связями
 class WarehouseService:
     """Сервис для работы с полиморфными связями в Warehouse"""

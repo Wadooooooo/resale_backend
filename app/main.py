@@ -2101,5 +2101,31 @@ async def get_dashboard_ready_for_sale(db: AsyncSession = Depends(get_db)):
     return [_format_phone_response(p) for p in phones]
 
 
+# --- Эндпоинты для Заметок ---
 
+@app.get("/api/v1/notes", response_model=List[schemas.Note], tags=["Notes"], dependencies=[Depends(security.require_permission("perform_sales"))])
+async def read_notes(show_all: bool = False, db: AsyncSession = Depends(get_db)):
+    """Получает список заметок. ?show_all=true для показа всех, включая выполненные."""
+    return await crud.get_notes(db=db, show_all=show_all)
+
+@app.post("/api/v1/notes", response_model=schemas.Note, tags=["Notes"], dependencies=[Depends(security.require_permission("perform_sales"))])
+async def create_new_note(
+    note: schemas.NoteCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Создает новую заметку."""
+    return await crud.create_note(db=db, note=note, user_id=current_user.id)
+
+@app.put("/api/v1/notes/{note_id}", response_model=schemas.Note, tags=["Notes"], dependencies=[Depends(security.require_permission("perform_sales"))])
+async def update_note(
+    note_id: int,
+    note_update: schemas.NoteUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Обновляет статус заметки (выполнена/не выполнена)."""
+    return await crud.update_note_status(
+        db=db, note_id=note_id, completed=note_update.is_completed, user_id=current_user.id
+    )
 

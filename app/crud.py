@@ -1851,3 +1851,51 @@ async def get_sales_by_user_id(db: AsyncSession, user_id: int, start_date: Optio
 
     result = await db.execute(query)
     return result.scalars().all()
+
+
+# --- Функции для Заметок ---
+
+async def get_notes(db: AsyncSession, show_all: bool = False):
+    """Получает список заметок. По умолчанию только невыполненные."""
+    query = (
+        select(models.Notes)
+        .options(
+            selectinload(models.Notes.created_by),
+            selectinload(models.Notes.completed_by)
+        )
+        .order_by(models.Notes.created_at.desc())
+    )
+    if not show_all:
+        query = query.filter(models.Notes.is_completed == False)
+        
+    result = await db.execute(query)
+    return result.scalars().all()
+
+async def create_note(db: AsyncSession, note: schemas.NoteCreate, user_id: int):
+    """Создает новую заметку."""
+    db_note = models.Notes(**note.model_dump(), created_by_user_id=user_id)
+    db.add(db_note)
+    await db.commit()
+    await db.refresh(db_note, attribute_names=['created_by'])
+    return db_note
+
+async def update_note_status(db: AsyncSession, note_id: int, completed: bool, user_id: int):
+    """Обновляет статус выполнения заметки."""
+    note = await db.get(models.Notes, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="Заметка не найдена")
+    
+    note.is_completed = completed
+    if completed:
+        note.completed_at = datetime.now()
+        note.completed_by_user_id = user_id
+    else:
+        # Если "раз-отмечаем", сбрасываем данные о выполнении
+        note.completed_at = None
+        note.completed_by_user_id = None
+        
+    await db.commit()
+    await db.refresh(note, attribute_names=['created_by', 'completed_by'])
+    return note
+
+
