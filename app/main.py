@@ -850,7 +850,8 @@ async def get_phone_history(
             models.PhoneEventType.ВОЗВРАТ_ОТ_КЛИЕНТА,
             models.PhoneEventType.ОТПРАВЛЕН_В_РЕМОНТ,
             models.PhoneEventType.ПОЛУЧЕН_ИЗ_РЕМОНТА,
-            models.PhoneEventType.ОБМЕНЕН
+            models.PhoneEventType.ОБМЕНЕН,
+            models.PhoneEventType.ПЕРЕМЕЩЕНИЕ,
         }
         # Создаем новый список, содержащий только разрешенные события
         logs_to_display = [
@@ -874,7 +875,8 @@ async def get_phone_history(
             base_name=model_name_base,
             model_name_id=phone.model.model_name_id,
             storage_id=phone.model.storage_id,
-            color_id=phone.model.color_id
+            color_id=phone.model.color_id,
+            image_url=phone.model.image_url
         )
         
     return schemas.PhoneHistoryResponse(
@@ -1597,6 +1599,20 @@ async def pay_for_supplier_order_endpoint(
     )
 
 
+@app.get("/api/v1/models/color-combos", response_model=List[schemas.ModelColorCombo], tags=["Models"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def read_unique_model_color_combos(db: AsyncSession = Depends(get_db)):
+    """Получает сгруппированный список 'модель+цвет' для управления фото."""
+    return await crud.get_unique_model_color_combos(db=db)
+
+@app.put("/api/v1/models/image-by-color", tags=["Models"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def update_image_for_combo(
+    update_data: schemas.ModelImageUpdate,
+    db: AsyncSession = Depends(get_db)
+):
+    """Обновляет URL изображения для всех моделей с одинаковым названием и цветом."""
+    return await crud.update_image_for_model_color_combo(db=db, data=update_data)
+
+
 @app.get("/api/v1/warehouse/valuation", response_model=schemas.InventoryValuation, tags=["Warehouse"], dependencies=[Depends(security.require_permission("manage_inventory"))])
 async def read_inventory_valuation(
     db: AsyncSession = Depends(get_db),
@@ -1845,7 +1861,8 @@ async def finish_phone_repair(
             base_name=model_name_base,
             model_name_id=updated_phone.model.model_name_id,
             storage_id=updated_phone.model.storage_id,
-            color_id=updated_phone.model.color_id
+            color_id=updated_phone.model.color_id,
+            image_url=updated_phone.model.image_url
         )
 
     return schemas.Phone(

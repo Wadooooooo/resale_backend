@@ -14,8 +14,47 @@ from sqlalchemy import select, or_
 from datetime import date, timedelta, datetime, time
 from sqlalchemy import func
 from typing import List, Optional
+from sqlalchemy import update
 from . import security
 
+
+async def get_unique_model_color_combos(db: AsyncSession):
+    """Получает уникальные комбинации 'модель + цвет' с их текущим URL изображения."""
+    query = (
+        select(
+            models.ModelName.id.label("model_name_id"),
+            models.ModelName.name.label("model_name"),
+            models.Colors.id.label("color_id"),
+            models.Colors.color_name.label("color_name"),
+            models.Models.image_url
+        )
+        .join(models.Models, models.ModelName.id == models.Models.model_name_id)
+        .join(models.Colors, models.Models.color_id == models.Colors.id)
+        .group_by(
+            models.ModelName.id,
+            models.ModelName.name,
+            models.Colors.id,
+            models.Colors.color_name,
+            models.Models.image_url
+        )
+        .distinct()
+    )
+    result = await db.execute(query)
+    return result.mappings().all()
+
+async def update_image_for_model_color_combo(db: AsyncSession, data: schemas.ModelImageUpdate):
+    """Находит все модели с указанным именем и цветом и обновляет их image_url."""
+    stmt = (
+        update(models.Models)
+        .where(
+            models.Models.model_name_id == data.model_name_id,
+            models.Models.color_id == data.color_id
+        )
+        .values(image_url=data.image_url)
+    )
+    await db.execute(stmt)
+    await db.commit()
+    return {"message": "Update successful"}
 
 # --- Функции для Инспекции ---
 
@@ -942,6 +981,8 @@ async def add_price_for_model_storage_combo(db: AsyncSession, data: schemas.Pric
 
 
     return new_prices
+
+
 
 
 # --- Функции для Движения Денег ---
@@ -1944,20 +1985,28 @@ async def move_phone_location(db: AsyncSession, phone_id: int, new_location: mod
     db.add(log_entry)
     await db.commit()
     
-    # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
-    # Запрашиваем телефон заново со всеми связанными данными, необходимыми для форматирования
-    final_phone_result = await db.execute(
-        select(models.Phones).options(
+    query = (
+        select(models.Phones, models.Warehouse.storage_location)
+        .join(models.Warehouse, (models.Phones.id == models.Warehouse.product_id) & (models.Warehouse.product_type_id == 1))
+        .options(
             selectinload(models.Phones.model).options(
                 selectinload(models.Models.model_name),
                 selectinload(models.Models.storage),
                 selectinload(models.Models.color)
             ),
             selectinload(models.Phones.model_number)
-        ).filter(models.Phones.id == phone_id)
+        )
+        .filter(models.Phones.id == phone_id)
     )
-    updated_phone = final_phone_result.scalars().one()
-    # Добавляем местоположение вручную, так как оно из другой таблицы
-    updated_phone.storage_location = new_location.value
-    return updated_phone
+    result = await db.execute(query)
+    phone_with_location = result.first()
 
+    if not phone_with_location:
+        # Эта ошибка не должна произойти, но это хорошая практика для защиты
+        raise HTTPException(status_code=404, detail="Не удалось найти телефон после перемещения.")
+
+    # Распаковываем результат и вручную добавляем атрибут местоположения к объекту телефона
+    updated_phone, location_value = phone_with_location
+    updated_phone.storage_location = location_value.value if location_value else None
+    
+    return updated_phone

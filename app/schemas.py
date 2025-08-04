@@ -103,19 +103,12 @@ class ModelName(BaseModel):
 class ModelDetail(BaseModel):
     # ID самой модели
     id: int 
-    
-    # Полное отформатированное название модели
     name: str 
-
     base_name: Optional[str] = None 
-    # ID базовой модели
     model_name_id: Optional[int] = None # ADD NEW: ID базовой модели
-    
-    # ID памяти
     storage_id: Optional[int] = None # ADD NEW: ID памяти
-
-    # ID цвета
     color_id: Optional[int] = None # ADD NEW: ID цвета
+    image_url: Optional[str] = None
     
     class Config:
         from_attributes = True # KEEP: Хотя мы будем явно создавать, это может помочь
@@ -398,6 +391,20 @@ class ModelStorageCombo(BaseModel):
     model_name_id: int
     storage_id: int
     current_price: Optional[Decimal] = None 
+
+
+class ModelColorCombo(BaseModel):
+    model_name_id: int
+    model_name: str
+    color_id: int
+    color_name: str
+    image_url: Optional[str] = None
+
+class ModelImageUpdate(BaseModel):
+    model_name_id: int
+    color_id: int
+    image_url: Optional[str] = None
+
 
 # Схема для установки цены на комбинацию
 class PriceSetForCombo(BaseModel):
