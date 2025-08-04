@@ -4,8 +4,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy.future import select
 from . import models
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload, joinedload
-from sqlalchemy import func, select, case
+from sqlalchemy.orm import selectinload, joinedload, aliased
+from sqlalchemy import func, select, case, or_
 from . import models, schemas
 from datetime import date
 from fastapi import HTTPException
@@ -1287,11 +1287,14 @@ async def get_phone_history_by_serial(db: AsyncSession, serial_number: str):
             selectinload(models.Phones.repairs).options(
                 selectinload(models.Repairs.loaner_logs).options(
                     selectinload(models.LoanerLog.loaner_phone).options(
-                        selectinload(models.Phones.model).selectinload(models.Models.model_name)
+                        selectinload(models.Phones.model).options(  
+                            selectinload(models.Models.model_name),
+                            selectinload(models.Models.storage),  
+                            selectinload(models.Models.color)    
+                        )
                     )
                 )
             )
-            # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
         )
         .filter(func.lower(models.Phones.serial_number) == func.lower(serial_number))
     )
@@ -1516,7 +1519,7 @@ async def start_repair(db: AsyncSession, phone_id: int, repair_data: schemas.Rep
     if not phone or phone.commercial_status != models.CommerceStatus.ПРОДАН:
         raise HTTPException(status_code=400, detail="Телефон не найден или не имеет статус 'ПРОДАН'")
     
-    phone.commercial_status = models.CommerceStatus.ГАРАНТИЙНЫЙ_РЕМОНТ
+    phone.commercial_status = models.CommerceStatus.В_РЕМОНТЕ
     
     new_repair_record = models.Repairs(**repair_data.model_dump(), phone_id=phone_id, user_id=user_id)
     db.add(new_repair_record)
@@ -1552,7 +1555,7 @@ async def finish_repair(db: AsyncSession, repair_id: int, finish_data: schemas.R
     if repair_record.repair_type == models.RepairType.ПЛАТНЫЙ:
         repair_record.payment_status = models.StatusPay.ОЖИДАНИЕ_ОПЛАТЫ
         log_details += f" Итоговая стоимость: {finish_data.final_cost or 0} руб. Ожидается оплата."
-    else:
+    else: # Для гарантийного ремонта
         repair_record.phone.commercial_status = models.CommerceStatus.ПРОДАН
     
     if finish_data.service_cost and finish_data.service_cost > 0 and finish_data.expense_account_id:
@@ -1577,27 +1580,18 @@ async def finish_repair(db: AsyncSession, repair_id: int, finish_data: schemas.R
     return phone_id_to_return
 
 
-async def record_repair_payment(db: AsyncSession, repair_id: int, payment_data: schemas.RepairPayment, user_id: int):
-    """Регистрирует оплату за платный ремонт."""
-    # ИЗМЕНЕНИЕ: Загружаем все связанные данные сразу
-    repair_result = await db.execute(
-        select(models.Repairs).options(
-            selectinload(models.Repairs.phone).options(
-                selectinload(models.Phones.model).selectinload(models.Models.model_name),
-                selectinload(models.Phones.model).selectinload(models.Models.storage),
-                selectinload(models.Phones.model).selectinload(models.Models.color),
-                selectinload(models.Phones.supplier_order)
-            )
-        ).filter(models.Repairs.id == repair_id)
-    )
-    repair = repair_result.scalars().one_or_none()
-
+async def record_repair_payment(db: AsyncSession, repair_id: int, payment_data: schemas.RepairPayment, user_id: int) -> int:
+    """Регистрирует оплату за платный ремонт и ВОЗВРАЩАЕТ ТОЛЬКО ID ТЕЛЕФОНА."""
+    repair = await db.get(models.Repairs, repair_id, options=[selectinload(models.Repairs.phone)])
     if not repair or not repair.phone:
-        raise HTTPException(status_code=404, detail="Запись о ремонте не найдена")
+        raise HTTPException(status_code=404, detail="Запись о ремонте или связанный телефон не найдены")
     if repair.repair_type != models.RepairType.ПЛАТНЫЙ:
         raise HTTPException(status_code=400, detail="Этот ремонт не является платным")
     if repair.payment_status == models.StatusPay.ОПЛАЧЕН:
         raise HTTPException(status_code=400, detail="Этот ремонт уже оплачен")
+
+    # Сохраняем ID телефона перед коммитом
+    phone_id_to_return = repair.phone.id
 
     # Создаем запись в движении денег
     cash_flow_entry = models.CashFlow(
@@ -1625,7 +1619,8 @@ async def record_repair_payment(db: AsyncSession, repair_id: int, payment_data: 
     
     await db.commit()
     
-    return repair.phone
+    # Возвращаем только ID
+    return phone_id_to_return
 
 async def get_phone_by_id_fully_loaded(db: AsyncSession, phone_id: int):
     """Загружает один телефон со всеми связанными данными для ответов API."""
@@ -1648,12 +1643,53 @@ async def get_phone_by_id_fully_loaded(db: AsyncSession, phone_id: int):
     return phone
 
 
-async def get_replacement_options(db: AsyncSession, model_id: int):
-    """Находит на складе телефоны той же модели для обмена."""
+async def get_replacement_options(db: AsyncSession, original_phone_model_id: int):
+    """
+    Находит на складе телефоны для обмена.
+    Теперь ищет ту же модель и память, но позволяет выбрать другой цвет.
+    """
+    # 1. Сначала получаем детали оригинальной модели (название и память)
+    original_model = await db.get(models.Models, original_phone_model_id)
+    if not original_model:
+        return []
+
+    # 2. Находим ID всех моделей с таким же названием и памятью (но любым цветом)
+    matching_models_result = await db.execute(
+        select(models.Models.id).filter(
+            models.Models.model_name_id == original_model.model_name_id,
+            models.Models.storage_id == original_model.storage_id
+        )
+    )
+    matching_model_ids = matching_models_result.scalars().all()
+    if not matching_model_ids:
+        return []
+
+    # 3. Теперь ищем на складе доступные телефоны, у которых model_id - один из найденных
+    latest_warehouse_sq = (
+        select(
+            models.Warehouse.product_id,
+            models.Warehouse.storage_location,
+            func.row_number().over(
+                partition_by=models.Warehouse.product_id,
+                order_by=models.Warehouse.id.desc()
+            ).label("row_num"),
+        )
+        .where(models.Warehouse.product_type_id == 1)
+        .subquery()
+    )
+
     query = (
         select(models.Phones)
-        .filter(models.Phones.model_id == model_id)
+        .join(latest_warehouse_sq, models.Phones.id == latest_warehouse_sq.c.product_id)
+        .where(latest_warehouse_sq.c.row_num == 1)
+        .filter(models.Phones.model_id.in_(matching_model_ids)) # <--- Используем новый список ID
         .filter(models.Phones.commercial_status == models.CommerceStatus.НА_СКЛАДЕ)
+        .filter(
+            or_(
+                latest_warehouse_sq.c.storage_location == models.EnumShop.СКЛАД,
+                latest_warehouse_sq.c.storage_location == models.EnumShop.ВИТРИНА
+            )
+        )
         .options(
             selectinload(models.Phones.model).selectinload(models.Models.model_name),
             selectinload(models.Phones.model).selectinload(models.Models.storage),
@@ -1665,16 +1701,25 @@ async def get_replacement_options(db: AsyncSession, model_id: int):
 
 async def process_phone_exchange(db: AsyncSession, original_phone_id: int, replacement_phone_id: int, user_id: int):
     """Обрабатывает обмен и создает логи для обоих телефонов."""
-    original_phone = await db.get(models.Phones, original_phone_id)
-    replacement_phone = await db.get(models.Phones, replacement_phone_id)
+    # Загружаем телефоны сразу с их моделями для проверки
+    original_phone = await db.get(models.Phones, original_phone_id, options=[selectinload(models.Phones.model)])
+    replacement_phone = await db.get(models.Phones, replacement_phone_id, options=[selectinload(models.Phones.model)])
 
+    # Проверки на существование и статусы
     if not original_phone or original_phone.commercial_status != models.CommerceStatus.ПРОДАН:
         raise HTTPException(status_code=400, detail="Исходный телефон не найден или не был продан.")
     if not replacement_phone or replacement_phone.commercial_status != models.CommerceStatus.НА_СКЛАДЕ:
         raise HTTPException(status_code=400, detail="Телефон для замены не найден на складе.")
-    if original_phone.model_id != replacement_phone.model_id:
-        raise HTTPException(status_code=400, detail="Телефоны должны быть одной модели.")
+    
+    # --- НОВАЯ ГИБКАЯ ПРОВЕРКА МОДЕЛЕЙ ---
+    if (not original_phone.model or not replacement_phone.model or
+            original_phone.model.model_name_id != replacement_phone.model.model_name_id or
+            original_phone.model.storage_id != replacement_phone.model.storage_id):
+        raise HTTPException(status_code=400, detail="Обмен возможен только на ту же модель и объем памяти.")
+    # --- КОНЕЦ НОВОЙ ПРОВЕРКИ ---
 
+    # ... (остальная часть функции остается без изменений)
+    
     orig_wh_res = await db.execute(
         select(models.Warehouse)
         .filter_by(product_id=original_phone.id, product_type_id=1)
@@ -1688,6 +1733,9 @@ async def process_phone_exchange(db: AsyncSession, original_phone_id: int, repla
         .order_by(models.Warehouse.id.desc())
         )
     replacement_warehouse_entry = repl_wh_res.scalars().first()
+
+    if not original_warehouse_entry or not replacement_warehouse_entry:
+        raise HTTPException(status_code=404, detail="Не найдена складская запись для одного из телефонов.")
 
     sale_detail_res = await db.execute(
         select(models.SaleDetails).filter_by(warehouse_id=original_warehouse_entry.id)
@@ -1724,14 +1772,7 @@ async def process_phone_exchange(db: AsyncSession, original_phone_id: int, repla
 
     await db.commit()
 
-    final_phone_result = await db.execute(
-            select(models.Phones).options(
-                selectinload(models.Phones.model).selectinload(models.Models.model_name),
-                selectinload(models.Phones.model).selectinload(models.Models.storage),
-                selectinload(models.Phones.model).selectinload(models.Models.color)
-            ).filter(models.Phones.id == original_phone_id)
-        )
-    return final_phone_result.scalars().one()
+    return await get_phone_by_id_fully_loaded(db, original_phone_id)
 
 
 async def process_supplier_replacement(
@@ -2118,90 +2159,105 @@ async def update_note_status(db: AsyncSession, note_id: int, completed: bool, us
 
 
 async def get_all_phones_in_stock_detailed(db: AsyncSession):
-    """Получает детальный список всех телефонов со статусом 'НА_СКЛАДЕ' с их местоположением."""
+    """Получает детальный список всех телефонов со статусом 'НА_СКЛАДЕ' с их самым последним местоположением."""
+
+    # 1. Создаем подзапрос, который нумерует записи о складе для каждого телефона,
+    #    начиная с самой новой (row_num = 1).
+    latest_warehouse_sq = (
+        select(
+            models.Warehouse,
+            func.row_number()
+            .over(
+                partition_by=models.Warehouse.product_id,
+                order_by=models.Warehouse.id.desc()
+            )
+            .label("row_num"),
+        )
+        .where(models.Warehouse.product_type_id == 1)
+        .subquery()
+    )
+
+    # Создаем псевдоним для удобного обращения к полям подзапроса
+    LatestWarehouse = aliased(models.Warehouse, latest_warehouse_sq)
+
+    # 2. Основной запрос теперь присоединяется к подзапросу и берет только строки, где row_num = 1.
     query = (
-        select(models.Phones, models.Warehouse.storage_location)
-        .join(models.Warehouse, (models.Phones.id == models.Warehouse.product_id) & (models.Warehouse.product_type_id == 1))
+        select(models.Phones, LatestWarehouse.storage_location)
+        .join(
+            latest_warehouse_sq,
+            models.Phones.id == latest_warehouse_sq.c.product_id,
+        )
+        .where(latest_warehouse_sq.c.row_num == 1) # <--- Ключевое условие
         .options(
             selectinload(models.Phones.model).selectinload(models.Models.model_name),
             selectinload(models.Phones.model).selectinload(models.Models.storage),
             selectinload(models.Phones.model).selectinload(models.Models.color),
             selectinload(models.Phones.model_number),
-            selectinload(models.Phones.supplier_order) # <--- ДОБАВЬТЕ ЭТУ СТРОКУ
+            selectinload(models.Phones.supplier_order)
         )
-        .filter(models.Phones.commercial_status == models.CommerceStatus.НА_СКЛАДЕ)
+        .filter(
+            or_(
+                models.Phones.commercial_status == models.CommerceStatus.НА_СКЛАДЕ,
+                models.Phones.commercial_status == models.CommerceStatus.ПОДМЕННЫЙ_ФОНД
+            )
+        )
         .order_by(models.Phones.id.desc())
     )
+
     result = await db.execute(query)
-    
+
     phones_with_location = []
+    # Метод .unique() здесь больше не нужен, так как запрос сам по себе корректен
     for phone, location in result.all():
-        phone.storage_location = location.value if location else None # Добавляем атрибут к объекту
+        phone.storage_location = location.value if location else None
         phones_with_location.append(phone)
-        
+
     return phones_with_location
 
 async def move_phone_location(db: AsyncSession, phone_id: int, new_location: models.EnumShop, user_id: int):
-    """Перемещает телефон между складом и витриной."""
+    """Перемещает телефон и обновляет его коммерческий статус в зависимости от местоположения."""
+    phone = await db.get(models.Phones, phone_id)
+    
     warehouse_entry_result = await db.execute(
-        select(models.Warehouse).filter_by(product_id=phone_id, product_type_id=1)
+        select(models.Warehouse)
+        .filter_by(product_id=phone_id, product_type_id=1)
+        .order_by(models.Warehouse.id.desc())
     )
     warehouse_entry = warehouse_entry_result.scalars().first()
 
-    if not warehouse_entry:
-        raise HTTPException(status_code=404, detail="Запись о складе для этого телефона не найдена.")
+    if not phone or not warehouse_entry:
+        raise HTTPException(status_code=404, detail="Телефон или его запись на складе не найдены.")
 
     old_location = warehouse_entry.storage_location.value if warehouse_entry.storage_location else "неизвестно"
     warehouse_entry.storage_location = new_location
+    
+    if new_location == models.EnumShop.ПОДМЕННЫЙ_ФОНД:
+        phone.commercial_status = models.CommerceStatus.ПОДМЕННЫЙ_ФОНД
+    elif new_location in [models.EnumShop.СКЛАД, models.EnumShop.ВИТРИНА]:
+        phone.commercial_status = models.CommerceStatus.НА_СКЛАДЕ
 
     log_entry = models.PhoneMovementLog(
-        phone_id=phone_id,
-        user_id=user_id,
+        phone_id=phone_id, user_id=user_id,
         event_type=models.PhoneEventType.ПЕРЕМЕЩЕНИЕ,
         details=f"Перемещен с '{old_location}' на '{new_location.value}'."
     )
     db.add(log_entry)
     await db.commit()
     
-    query = (
-        select(models.Phones, models.Warehouse.storage_location)
-        .join(models.Warehouse, (models.Phones.id == models.Warehouse.product_id) & (models.Warehouse.product_type_id == 1))
-        .options(
-            selectinload(models.Phones.model).options(
-                selectinload(models.Models.model_name),
-                selectinload(models.Models.storage),
-                selectinload(models.Models.color)
-            ),
-            selectinload(models.Phones.model_number),
-            selectinload(models.Phones.supplier_order) # <--- ДОБАВЬТЕ ЭТУ СТРОКУ
-        )
-        .filter(models.Phones.id == phone_id)
-    )
-    result = await db.execute(query)
-    phone_with_location = result.first()
-
-    if not phone_with_location:
-        # Эта ошибка не должна произойти, но это хорошая практика для защиты
-        raise HTTPException(status_code=404, detail="Не удалось найти телефон после перемещения.")
-
-    # Распаковываем результат и вручную добавляем атрибут местоположения к объекту телефона
-    updated_phone, location_value = phone_with_location
-    updated_phone.storage_location = location_value.value if location_value else None
-    
+    # Загружаем и возвращаем обновленные данные
+    updated_phone = await get_phone_by_id_fully_loaded_with_location(db, phone_id)
     return updated_phone
 
 async def get_available_for_loaner(db: AsyncSession):
-    """Получает список телефонов, доступных для выдачи в подменный фонд."""
+    """Получает список телефонов, которые доступны для выдачи в подменный фонд."""
     query = (
         select(models.Phones)
-        .join(models.Warehouse, (models.Phones.id == models.Warehouse.product_id) & (models.Warehouse.product_type_id == 1))
         .options(
             selectinload(models.Phones.model).selectinload(models.Models.model_name),
             selectinload(models.Phones.model).selectinload(models.Models.storage),
             selectinload(models.Phones.model).selectinload(models.Models.color)
         )
-        .filter(models.Warehouse.storage_location == models.EnumShop.ПОДМЕННЫЙ_ФОНД)
-        .filter(models.Phones.commercial_status == models.CommerceStatus.НА_СКЛАДЕ)
+        .filter(models.Phones.commercial_status == models.CommerceStatus.ПОДМЕННЫЙ_ФОНД)
         .order_by(models.Phones.id.desc())
     )
     result = await db.execute(query)
@@ -2210,24 +2266,17 @@ async def get_available_for_loaner(db: AsyncSession):
 async def issue_loaner(db: AsyncSession, repair_id: int, loaner_phone_id: int, user_id: int):
     """Выдает подменный телефон и меняет его статус."""
     loaner_phone = await db.get(models.Phones, loaner_phone_id)
-    if not loaner_phone or loaner_phone.commercial_status != models.CommerceStatus.НА_СКЛАДЕ:
-        raise HTTPException(status_code=400, detail="Этот телефон нельзя выдать, он не на складе.")
+    
+    if not loaner_phone or loaner_phone.commercial_status != models.CommerceStatus.ПОДМЕННЫЙ_ФОНД:
+        raise HTTPException(status_code=400, detail="Этот телефон недоступен для выдачи.")
 
-    # Меняем статус подменного телефона
-    loaner_phone.commercial_status = models.CommerceStatus.ПОДМЕННЫЙ_ФОНД
+    loaner_phone.commercial_status = models.CommerceStatus.ВЫДАН_КАК_ПОДМЕННЫЙ
 
-    # Создаем запись в логе выдачи
-    new_log = models.LoanerLog(
-        repair_id=repair_id,
-        loaner_phone_id=loaner_phone_id,
-        user_id=user_id
-    )
+    new_log = models.LoanerLog(repair_id=repair_id, loaner_phone_id=loaner_phone_id, user_id=user_id)
     db.add(new_log)
 
-    # Создаем запись в истории самого подменного телефона
     history_log = models.PhoneMovementLog(
-        phone_id=loaner_phone_id,
-        user_id=user_id,
+        phone_id=loaner_phone_id, user_id=user_id,
         event_type=models.PhoneEventType.ВЫДАН_КАК_ПОДМЕННЫЙ,
         details=f"Выдан как подменный телефон по ремонту №{repair_id}"
     )
@@ -2279,5 +2328,32 @@ async def get_phone_by_id_fully_loaded(db: AsyncSession, phone_id: int):
     phone = result.scalars().one_or_none()
     if not phone:
         raise HTTPException(status_code=404, detail="Телефон не найден")
+    return phone
+
+async def get_phone_by_id_fully_loaded_with_location(db: AsyncSession, phone_id: int):
+    """Загружает один телефон со всеми связанными данными и последним местоположением."""
+    query = (
+        select(models.Phones, models.Warehouse.storage_location)
+        .join(models.Warehouse, (models.Phones.id == models.Warehouse.product_id) & (models.Warehouse.product_type_id == 1))
+        .options(
+            selectinload(models.Phones.model).options(
+                selectinload(models.Models.model_name),
+                selectinload(models.Models.storage),
+                selectinload(models.Models.color)
+            ),
+            selectinload(models.Phones.model_number),
+            selectinload(models.Phones.supplier_order)  # <--- ДОБАВЛЕНА ЭТА СТРОКА
+        )
+        .filter(models.Phones.id == phone_id)
+        .order_by(models.Warehouse.id.desc())
+    )
+    result = await db.execute(query)
+    phone_with_location = result.first()
+
+    if not phone_with_location:
+        raise HTTPException(status_code=404, detail="Телефон не найден.")
+    
+    phone, location = phone_with_location
+    phone.storage_location = location.value if location else None
     return phone
 

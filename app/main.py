@@ -791,7 +791,22 @@ async def get_phone_history(
 
         if active_loaner_log and active_loaner_log.loaner_phone:
             loaner = active_loaner_log.loaner_phone
-            loaner_details_str = f"ID: {loaner.id}, {loaner.model.model_name.name if loaner.model else ''} (S/N: {loaner.serial_number or 'б/н'})"
+            
+            # --- НАЧАЛО НОВОЙ ЛОГИКИ СБОРКИ СТРОКИ ---
+            model_name_base = ""
+            storage_display = ""
+            color_name = ""
+            
+            if loaner.model:
+                model_name_base = loaner.model.model_name.name if loaner.model.model_name else ""
+                storage_display = models.format_storage_for_display(loaner.model.storage.storage) if loaner.model.storage else ""
+                color_name = loaner.model.color.color_name if loaner.model.color else ""
+            
+            full_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+            
+            loaner_details_str = f"ID: {loaner.id}, {full_name} (S/N: {loaner.serial_number or 'б/н'})"
+            # --- КОНЕЦ НОВОЙ ЛОГИКИ ---
+
             active_loaner_info = schemas.ActiveLoanerLog(
                 id=active_loaner_log.id,
                 date_issued=active_loaner_log.date_issued,
@@ -1814,10 +1829,16 @@ async def pay_for_repair(
     current_user: models.Users = Depends(security.get_current_active_user)
 ):
     """Регистрирует оплату за платный ремонт."""
-    updated_phone = await crud.record_repair_payment(
+    # 1. Получаем ID телефона из CRUD-функции
+    phone_id = await crud.record_repair_payment(
         db=db, repair_id=repair_id, payment_data=payment_data, user_id=current_user.id
     )
-    return _format_phone_response(updated_phone)
+    
+    # 2. Безопасно загружаем полные данные о телефоне для ответа
+    fresh_phone_data = await crud.get_phone_by_id_fully_loaded(db, phone_id)
+    
+    # 3. Форматируем и возвращаем ответ
+    return _format_phone_response(fresh_phone_data)
 
 
 @app.post("/api/v1/phones/{phone_id}/replace-from-supplier", response_model=schemas.Phone, tags=["Returns"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_inspections"))])
@@ -1896,7 +1917,7 @@ async def get_replacement_phones(phone_id: int, db: AsyncSession = Depends(get_d
     if not phone:
         raise HTTPException(status_code=404, detail="Телефон не найден")
 
-    replacement_phones = await crud.get_replacement_options(db=db, model_id=phone.model_id)
+    replacement_phones = await crud.get_replacement_options(db=db, original_phone_model_id=phone.model_id)
 
     # --- НАЧАЛО ИЗМЕНЕНИЙ: Формируем полный ответ ---
     response_list = []
