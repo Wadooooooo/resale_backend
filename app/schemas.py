@@ -138,9 +138,8 @@ class Phone(BaseModel):
     added_date: Optional[date] = None
     model_number: Optional[ModelNumber] = None
     storage_location: Optional[str] = None
+    defect_reason: Optional[str] = None
 
-    class Config:
-        from_attributes = True
 
 class PhoneCreate(BaseModel):
     serial_number: Optional[str] = None
@@ -545,7 +544,48 @@ class PhoneMovementLog(BaseModel):
     class Config: # <-- Оставляем только один
         from_attributes = True
 
+class RepairCreate(BaseModel):
+    repair_type: str # "ГАРАНТИЙНЫЙ" или "ПЛАТНЫЙ"
+    estimated_cost: Optional[Decimal] = None
+    customer_name: str
+    customer_phone: str
+    problem_description: str
+    device_condition: str
+    included_items: Optional[str] = None
+    notes: Optional[str] = None
 
+class RepairFinish(BaseModel):
+    work_performed: str
+    final_cost: Optional[Decimal] = None
+    service_cost: Optional[Decimal] = None     
+    expense_account_id: Optional[int] = None
+
+class RepairPayment(BaseModel):
+    account_id: int
+    amount: Decimal
+
+
+class ActiveLoanerLog(BaseModel):
+    id: int
+    date_issued: datetime
+    loaner_phone_details: str # e.g., "iPhone 15 Pro (SN: ...)"
+    
+    class Config:
+        from_attributes = True
+
+class Repair(RepairCreate):
+    id: int
+    phone_id: int
+    user_id: int
+    date_accepted: datetime
+    date_returned: Optional[datetime] = None
+    work_performed: Optional[str] = None
+    final_cost: Optional[Decimal] = None
+    payment_status: Optional[str] = None
+    active_loaner: Optional[ActiveLoanerLog] = None
+
+    class Config:
+        from_attributes = True
 
 class PhoneHistoryResponse(Phone): # Наследуем от основной схемы телефона
     purchase_info: Optional[PhoneHistoryPurchase] = None
@@ -553,7 +593,8 @@ class PhoneHistoryResponse(Phone): # Наследуем от основной с
     warehouse_info: Optional[PhoneHistoryWarehouse] = None
     sale_info: Optional[PhoneHistorySale] = None
     movement_logs: List[PhoneMovementLog] = []
-    
+    repairs: List[Repair] = []
+
 class RefundRequest(BaseModel):
     account_id: int # ID счета, с которого возвращаются деньги
     notes: Optional[str] = None
@@ -572,27 +613,8 @@ class SupplierReplacementCreate(BaseModel):
     new_model_id: int
 
 
-class WarrantyRepairCreate(BaseModel):
-    customer_name: str
-    customer_phone: str
-    problem_description: str
-    device_condition: str
-    included_items: Optional[str] = None
-    notes: Optional[str] = None
 
-class WarrantyRepairFinish(BaseModel):
-    work_performed: str
 
-class WarrantyRepair(WarrantyRepairCreate):
-    id: int
-    phone_id: int
-    user_id: int
-    date_accepted: datetime
-    date_returned: Optional[datetime] = None
-    work_performed: Optional[str] = None
-
-    class Config:
-        from_attributes = True
 
 
 class RoleInfo(BaseModel):
@@ -635,3 +657,21 @@ class NoteUpdate(BaseModel):
 
 class MovePhoneRequest(BaseModel):
     new_location: str
+
+class LoanerPhoneInfo(BaseModel):
+    id: int
+    name: str
+    serial_number: Optional[str] = None
+
+class IssueLoanerRequest(BaseModel):
+    loaner_phone_id: int
+
+class ActiveLoanerLog(BaseModel):
+    id: int
+    date_issued: datetime
+    loaner_phone_details: str # e.g., "iPhone 15 Pro (SN: ...)"
+    
+    class Config:
+        from_attributes = True
+
+

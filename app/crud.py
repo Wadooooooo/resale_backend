@@ -18,6 +18,49 @@ from sqlalchemy import update
 from . import security
 
 
+BATTERY_THRESHOLDS = {
+    # Вы можете добавлять сюда любые модели по аналогии
+    "iPhone 12": 12.0,
+    "iPhone 13": 12.0,
+    "iPhone 14": 11.5,
+    "iPhone 14 Pro": 9.0,
+    "iPhone 15": 8.5,
+}
+# Пороговое значение по умолчанию для моделей, которых нет в списке
+DEFAULT_BATTERY_THRESHOLD = 12.0
+
+def _extract_specific_defect_reason(details: str) -> str:
+    """Извлекает из полного лога только строки с конкретной причиной брака."""
+    if not details:
+        return "Причина не указана."
+
+    # Если в логе есть результаты проверки из чек-листа
+    if "--- Результаты проверки ---" in details:
+        try:
+            # Отделяем часть с чек-листом
+            checklist_str = details.split("--- Результаты проверки ---")[1]
+            
+            # Находим все строки, в которых есть слово "БРАК"
+            failed_items = [
+                # Убираем лишние символы и само слово "БРАК"
+                line.strip().replace(": БРАК", "").split('(')[0].strip()
+                for line in checklist_str.strip().split('\n')
+                if "БРАК" in line
+            ]
+            
+            if failed_items:
+                # Если найдены, возвращаем их списком
+                return "Брак: " + ", ".join(failed_items)
+            else:
+                # Если слово "БРАК" не найдено (маловероятно), возвращаем общий статус
+                return "Брак по результатам инспекции"
+        except Exception:
+             # В случае любой ошибки при обработке строки, возвращаем исходный текст
+            return details
+    else:
+        # Для других типов логов (возврат, обмен, тест АКБ) возвращаем как есть
+        return details
+    
 async def get_unique_model_color_combos(db: AsyncSession):
     """Получает уникальные комбинации 'модель + цвет' с их текущим URL изображения."""
     query = (
@@ -66,7 +109,8 @@ async def get_phones_for_inspection(db: AsyncSession):
             selectinload(models.Phones.model).selectinload(models.Models.model_name),
             selectinload(models.Phones.model).selectinload(models.Models.storage),
             selectinload(models.Phones.model).selectinload(models.Models.color),
-            selectinload(models.Phones.model_number)
+            selectinload(models.Phones.model_number),
+            selectinload(models.Phones.supplier_order)
         )
         .filter(models.Phones.technical_status == models.TechStatus.ОЖИДАЕТ_ПРОВЕРКУ)
     )
@@ -204,16 +248,23 @@ async def create_initial_inspection(db: AsyncSession, phone_id: int, inspection_
                 selectinload(models.Models.color)
             ),
             # VVV ADD THIS LINE VVV
-            selectinload(models.Phones.model_number)
+            selectinload(models.Phones.model_number),
+            selectinload(models.Phones.supplier_order)
         ).filter(models.Phones.id == phone_id)
     )
     return final_phone_result.scalars().one()
 
 
 async def add_battery_test_results(db: AsyncSession, inspection_id: int, battery_data: schemas.BatteryTestCreate, user_id: int):
-    """Добавляет результаты теста аккумулятора к существующей проверке."""
+    """Добавляет результаты теста аккумулятора и принимает решение о браке."""
     inspection_result = await db.execute(
-        select(models.DeviceInspection).options(selectinload(models.DeviceInspection.phone))
+        select(models.DeviceInspection)
+        # VVV ДОБАВЛЕНА ЗАГРУЗКА ДАННЫХ О МОДЕЛИ VVV
+        .options(
+            selectinload(models.DeviceInspection.phone)
+            .selectinload(models.Phones.model)
+            .selectinload(models.Models.model_name)
+        )
         .filter(models.DeviceInspection.id == inspection_id)
     )
     inspection = inspection_result.scalars().one_or_none()
@@ -221,8 +272,6 @@ async def add_battery_test_results(db: AsyncSession, inspection_id: int, battery
     if not inspection or not inspection.phone:
         raise HTTPException(status_code=404, detail="Инспекция или связанный телефон не найдены")
 
-    # --- НАЧАЛО ИСПРАВЛЕНИЯ ---
-    # Получаем ID телефона ДО коммита и сохраняем его в переменную
     phone_id_to_return = inspection.phone.id
 
     duration = None
@@ -249,26 +298,49 @@ async def add_battery_test_results(db: AsyncSession, inspection_id: int, battery
     )
     db.add(new_battery_test)
 
-    inspection.phone.technical_status = models.TechStatus.НА_УПАКОВКЕ
+    # VVV НАЧАЛО НОВОЙ ЛОГИКИ ПРОВЕРКИ VVV
+    phone = inspection.phone
+    model_name = ""
+    if phone.model and phone.model.model_name:
+        # Ищем модель в словаре по частичному совпадению (например, "iPhone 14 Pro" сработает для "iPhone 14")
+        for key in BATTERY_THRESHOLDS:
+            if key in phone.model.model_name.name:
+                model_name = key
+                break
+
+    threshold = BATTERY_THRESHOLDS.get(model_name, DEFAULT_BATTERY_THRESHOLD)
+
+    log_event = models.PhoneEventType.ИНСПЕКЦИЯ_ПРОЙДЕНА # По умолчанию
+    log_details = ""
+
+    if drain_rate is not None and drain_rate > Decimal(threshold):
+        # Тест НЕ пройден
+        phone.technical_status = models.TechStatus.БРАК
+        log_event = models.PhoneEventType.ОБНАРУЖЕН_БРАК
+        log_details = f"Тест АКБ не пройден. Расход: {drain_rate:.2f}%/час (Порог: {threshold}%/час). Отправлен в брак."
+    else:
+        # Тест пройден
+        phone.technical_status = models.TechStatus.НА_УПАКОВКЕ
+        log_details = f"Тест АКБ пройден. Расход: {f'{drain_rate:.2f}' if drain_rate else 'N/A'} %/час (Порог: {threshold}%/час). Статус изменен на 'На упаковке'."
 
     log_entry = models.PhoneMovementLog(
-        phone_id=inspection.phone.id,
-        user_id=user_id,
-        event_type=models.PhoneEventType.ИНСПЕКЦИЯ_ПРОЙДЕНА,
-        details=f"Тест АКБ пройден. Расход: {f'{drain_rate:.2f}' if drain_rate else 'N/A'} %/час. Статус изменен на 'На упаковке'."
+        phone_id=phone.id, user_id=user_id,
+        event_type=log_event, details=log_details
     )
     db.add(log_entry)
-    
+    # ^^^ КОНЕЦ НОВОЙ ЛОГИКИ ПРОВЕРКИ ^^^
+
     await db.commit()
 
-    # Теперь мы запрашиваем телефон по уже сохраненному ID
+    # Запрос на возврат данных остается прежним
     final_phone_result = await db.execute(
         select(models.Phones).options(
             selectinload(models.Phones.model).selectinload(models.Models.model_name),
             selectinload(models.Phones.model).selectinload(models.Models.storage),
             selectinload(models.Phones.model).selectinload(models.Models.color),
-            selectinload(models.Phones.model_number)
-        ).filter(models.Phones.id == phone_id_to_return) # <--- ИСПОЛЬЗУЕМ СОХРАНЕННЫЙ ID
+            selectinload(models.Phones.model_number),
+            selectinload(models.Phones.supplier_order)
+        ).filter(models.Phones.id == phone_id_to_return)
     )
     return final_phone_result.scalars().one()
 
@@ -283,7 +355,8 @@ async def get_phones_for_battery_test(db: AsyncSession):
                 selectinload(models.Models.storage),
                 selectinload(models.Models.color)
             ),
-            selectinload(models.DeviceInspection.phone).selectinload(models.Phones.model_number)
+            selectinload(models.DeviceInspection.phone).selectinload(models.Phones.model_number),
+            selectinload(models.DeviceInspection.phone).selectinload(models.Phones.supplier_order)
         )
         .filter(models.Phones.technical_status == models.TechStatus.НА_ТЕСТЕ_АККУМУЛЯТОРА)
         .order_by(models.DeviceInspection.phone_id, models.DeviceInspection.inspection_date.desc())
@@ -343,6 +416,27 @@ async def get_user_by_username(db: AsyncSession, username: str):
     )
     result = await db.execute(query)
     return result.unique().scalars().first()
+
+async def get_phone_by_id_fully_loaded(db: AsyncSession, phone_id: int):
+    """Безопасно загружает один телефон со всеми связанными данными для ответов API."""
+    query = (
+        select(models.Phones)
+        .options(
+            selectinload(models.Phones.model).options(
+                selectinload(models.Models.model_name),
+                selectinload(models.Models.storage),
+                selectinload(models.Models.color)
+            ),
+            selectinload(models.Phones.model_number),
+            selectinload(models.Phones.supplier_order)
+        )
+        .filter(models.Phones.id == phone_id)
+    )
+    result = await db.execute(query)
+    phone = result.scalars().one_or_none()
+    if not phone:
+        raise HTTPException(status_code=404, detail="Телефон не найден")
+    return phone
 
 async def get_phones(db: Session, skip: int = 0, limit: int = 1000):
     """Получает список телефонов с вложенными данными о модели."""
@@ -734,7 +828,11 @@ async def get_customers(db: AsyncSession):
 async def get_products_for_sale(db: AsyncSession):
     """Получает единый список всех товаров со склада."""
     warehouse_items_result = await db.execute(
-        select(models.Warehouse).filter(models.Warehouse.quantity > 0)
+        select(models.Warehouse).filter(
+            models.Warehouse.quantity > 0,
+            # VVV ДОБАВЬТЕ ЭТО УСЛОВИЕ VVV
+            models.Warehouse.storage_location != models.EnumShop.ПОДМЕННЫЙ_ФОНД
+        )
     )
     warehouse_items = warehouse_items_result.scalars().all()
 
@@ -1181,71 +1279,82 @@ async def get_phone_history_by_serial(db: AsyncSession, serial_number: str):
                 selectinload(models.DeviceInspection.inspection_results).selectinload(models.InspectionResults.checklist_item),
                 selectinload(models.DeviceInspection.battery_tests)
             ),
-            
             selectinload(models.Phones.movement_logs).options(
                 selectinload(models.PhoneMovementLog.user)
             ),
-            selectinload(models.Phones.model_number)
+            selectinload(models.Phones.model_number),
+            # --- НАЧАЛО ИСПРАВЛЕНИЯ ---
+            selectinload(models.Phones.repairs).options(
+                selectinload(models.Repairs.loaner_logs).options(
+                    selectinload(models.LoanerLog.loaner_phone).options(
+                        selectinload(models.Phones.model).selectinload(models.Models.model_name)
+                    )
+                )
+            )
+            # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
         )
         .filter(func.lower(models.Phones.serial_number) == func.lower(serial_number))
     )
     phone_result = await db.execute(phone_query)
-    phone = phone_result.scalars().first()
+    phone = phone_result.scalars().unique().one_or_none() # Используем unique() для корректной сборки
 
     if not phone:
         raise HTTPException(status_code=404, detail="Телефон с таким серийным номером не найден")
-
-    sale_info = None
-    warehouse_info = None
-
-    warehouse_entry_result = await db.execute(
-            select(models.Warehouse)
-            .options(
-                selectinload(models.Warehouse.shop),
-                selectinload(models.Warehouse.user))
-            .filter_by(product_id=phone.id, product_type_id=1)
-    )
-    warehouse_entry = warehouse_entry_result.scalars().first()
-
-    if warehouse_entry:
-        warehouse_info = {
-            "added_date": warehouse_entry.added_date,
-            "shop_name": warehouse_entry.shop.name if warehouse_entry.shop else "Неизвестный магазин"
-        }
-
-        sale_detail_result = await db.execute(
-            select(models.SaleDetails)
-            .options(selectinload(models.SaleDetails.sale).selectinload(models.Sales.customer))
-            .filter_by(warehouse_id=warehouse_entry.id)
-        )
-        sale_detail = sale_detail_result.scalars().first()
-        if sale_detail and sale_detail.sale:
-            sale = sale_detail.sale
-            sale_info = {
-                "sale_id": sale.id,
-                "sale_date": sale.sale_date,
-                "unit_price": sale_detail.unit_price,
-                "customer_name": sale.customer.name if sale.customer else None,
-                "customer_number": sale.customer.number if sale.customer else None,
-            }
-
+    
     return phone
 
 async def get_defective_phones(db: AsyncSession):
-    """Получает телефоны со статусом 'БРАК', которые еще не отправлены поставщику."""
+    """Получает телефоны со статусом 'БРАК' с последней записью в логе как причиной."""
     query = (
         select(models.Phones)
         .options(
             selectinload(models.Phones.model).selectinload(models.Models.model_name),
             selectinload(models.Phones.model).selectinload(models.Models.storage),
             selectinload(models.Phones.model).selectinload(models.Models.color),
-            selectinload(models.Phones.model_number)  # <--- ДОБАВЬТЕ ЭТУ СТРОКУ
+            selectinload(models.Phones.model_number),
+            selectinload(models.Phones.supplier_order),
+            selectinload(models.Phones.repairs).options(
+                selectinload(models.Repairs.loaner_logs).options(
+                    selectinload(models.LoanerLog.loaner_phone).options(
+                        selectinload(models.Phones.model).selectinload(models.Models.model_name)
+                    )
+                )
+            ),
+            selectinload(models.Phones.movement_logs) # Загружаем логи
         )
         .filter(models.Phones.technical_status == models.TechStatus.БРАК)
         .filter(models.Phones.commercial_status != models.CommerceStatus.ОТПРАВЛЕН_ПОСТАВЩИКУ)
     )
     result = await db.execute(query)
-    return result.scalars().all()
+    phones = result.scalars().unique().all() # Используем unique() для корректной сборки
+
+    for phone in phones:
+        defect_log = None
+        # Сортируем логи, чтобы проверить самые свежие первыми
+        sorted_logs = sorted(phone.movement_logs, key=lambda log: log.timestamp, reverse=True)
+        
+        # Ищем последнюю запись, которая является причиной брака
+        for phone in phones:
+            defect_log = None
+            sorted_logs = sorted(phone.movement_logs, key=lambda log: log.timestamp, reverse=True)
+
+            for log in sorted_logs:
+                if log.event_type in [
+                    models.PhoneEventType.ОБНАРУЖЕН_БРАК,
+                    models.PhoneEventType.ВОЗВРАТ_ОТ_КЛИЕНТА,
+                    models.PhoneEventType.ОБМЕНЕН
+                ]:
+                    defect_log = log
+                    break
+
+            if defect_log and defect_log.details:
+                # VVV ИЗМЕНЕНИЕ ЗДЕСЬ VVV
+                phone.defect_reason = _extract_specific_defect_reason(defect_log.details)
+            elif defect_log:
+                phone.defect_reason = defect_log.event_type.value
+            else:
+                phone.defect_reason = "Изначальная причина не найдена"
+    return phones
 
 async def get_phones_sent_to_supplier(db: AsyncSession):
     """Получает телефоны, отправленные поставщику."""
@@ -1255,12 +1364,43 @@ async def get_phones_sent_to_supplier(db: AsyncSession):
             selectinload(models.Phones.model).selectinload(models.Models.model_name),
             selectinload(models.Phones.model).selectinload(models.Models.storage),
             selectinload(models.Phones.model).selectinload(models.Models.color),
-            selectinload(models.Phones.model_number)  # <--- И ЭТУ СТРОКУ
+            selectinload(models.Phones.model_number),
+            selectinload(models.Phones.supplier_order),
+            selectinload(models.Phones.movement_logs)
         )
         .filter(models.Phones.commercial_status == models.CommerceStatus.ОТПРАВЛЕН_ПОСТАВЩИКУ)
     )
     result = await db.execute(query)
-    return result.scalars().all()
+    phones = result.scalars().unique().all()
+
+    for phone in phones:
+        defect_log = None
+        # Сортируем логи, чтобы проверить самые свежие первыми
+        sorted_logs = sorted(phone.movement_logs, key=lambda log: log.timestamp, reverse=True)
+        
+        # Ищем последнюю запись, которая является причиной брака
+        for phone in phones:
+            defect_log = None
+            sorted_logs = sorted(phone.movement_logs, key=lambda log: log.timestamp, reverse=True)
+
+            for log in sorted_logs:
+                if log.event_type in [
+                    models.PhoneEventType.ОБНАРУЖЕН_БРАК,
+                    models.PhoneEventType.ВОЗВРАТ_ОТ_КЛИЕНТА,
+                    models.PhoneEventType.ОБМЕНЕН
+                ]:
+                    defect_log = log
+                    break
+
+            if defect_log and defect_log.details:
+                # VVV ИЗМЕНЕНИЕ ЗДЕСЬ VVV
+                phone.defect_reason = _extract_specific_defect_reason(defect_log.details)
+            elif defect_log:
+                phone.defect_reason = defect_log.event_type.value
+            else:
+                phone.defect_reason = "Изначальная причина не найдена"
+
+    return phones
 
 async def send_phones_to_supplier(db: AsyncSession, phone_ids: List[int], user_id: int):
     """Меняет коммерческий статус телефонов и создает лог."""
@@ -1370,112 +1510,143 @@ async def process_customer_refund(db: AsyncSession, phone_id: int, refund_data: 
     return phone
 
 
-async def start_warranty_repair(db: AsyncSession, phone_id: int, repair_data: schemas.WarrantyRepairCreate, user_id: int):
-    """Начинает ремонт, создает лог, запись о ремонте и возвращает готовую Pydantic-схему."""
+async def start_repair(db: AsyncSession, phone_id: int, repair_data: schemas.RepairCreate, user_id: int):
+    """Начинает ремонт и НЕ ВОЗВРАЩАЕТ ОБЪЕКТ."""
     phone = await db.get(models.Phones, phone_id)
     if not phone or phone.commercial_status != models.CommerceStatus.ПРОДАН:
         raise HTTPException(status_code=400, detail="Телефон не найден или не имеет статус 'ПРОДАН'")
     
     phone.commercial_status = models.CommerceStatus.ГАРАНТИЙНЫЙ_РЕМОНТ
     
-    new_repair_record = models.WarrantyRepair(
-        phone_id=phone_id,
-        user_id=user_id,
-        **repair_data.model_dump()
-    )
+    new_repair_record = models.Repairs(**repair_data.model_dump(), phone_id=phone_id, user_id=user_id)
     db.add(new_repair_record)
     
+    log_details = f"Принят от клиента на {repair_data.repair_type.lower()} ремонт. Проблема: {repair_data.problem_description}"
+    if repair_data.repair_type == 'ПЛАТНЫЙ' and repair_data.estimated_cost:
+        log_details += f" Предв. стоимость: {repair_data.estimated_cost} руб."
+
     log_entry = models.PhoneMovementLog(
-        phone_id=phone.id,
-        user_id=user_id,
-        event_type=models.PhoneEventType.ОТПРАВЛЕН_В_РЕМОНТ,
-        details=f"Принят от клиента на гарантийный ремонт. Проблема: {repair_data.problem_description}"
+        phone_id=phone.id, user_id=user_id,
+        event_type=models.PhoneEventType.ОТПРАВЛЕН_В_РЕМОНТ, details=log_details
     )
     db.add(log_entry)
     
     await db.commit()
 
-    # Запрашиваем телефон заново со всеми связями для ответа
-    final_phone_result = await db.execute(
-        select(models.Phones).options(
-            selectinload(models.Phones.model).options(
-                selectinload(models.Models.model_name),
-                selectinload(models.Models.storage),
-                selectinload(models.Models.color)
-            ),
-            selectinload(models.Phones.model_number)
-        ).filter(models.Phones.id == phone_id)
-    )
-    updated_phone = final_phone_result.scalars().one()
 
-    # Форматируем ответ прямо здесь
-    model_detail = None
-    if updated_phone.model:
-        model_name_base = updated_phone.model.model_name.name if updated_phone.model.model_name else ""
-        storage_display = models.format_storage_for_display(updated_phone.model.storage.storage) if updated_phone.model.storage else ""
-        color_name = updated_phone.model.color.color_name if updated_phone.model.color else ""
-        full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
-        model_detail = schemas.ModelDetail(
-            id=updated_phone.model.id,
-            name=full_display_name,
-            base_name=model_name_base,
-            model_name_id=updated_phone.model.model_name_id,
-            storage_id=updated_phone.model.storage_id,
-            color_id=updated_phone.model.color_id
-        )
+async def finish_repair(db: AsyncSession, repair_id: int, finish_data: schemas.RepairFinish, user_id: int) -> int:
+    """Завершает ремонт и ВОЗВРАЩАЕТ ТОЛЬКО ID ТЕЛЕФОНА."""
+    repair_record = await db.get(models.Repairs, repair_id, options=[selectinload(models.Repairs.phone)])
+    if not repair_record or not repair_record.phone:
+        raise HTTPException(status_code=404, detail="Запись о ремонте или связанный телефон не найдены")
+    
+    phone_id_to_return = repair_record.phone.id
+    
+    repair_record.date_returned = datetime.now()
+    repair_record.work_performed = finish_data.work_performed
+    repair_record.final_cost = finish_data.final_cost
+    repair_record.service_cost = finish_data.service_cost
 
-    return schemas.Phone(
-        id=updated_phone.id,
-        serial_number=updated_phone.serial_number,
-        technical_status=updated_phone.technical_status.value if updated_phone.technical_status else None,
-        commercial_status=updated_phone.commercial_status.value if updated_phone.commercial_status else None,
-        added_date=updated_phone.added_date,
-        model=model_detail,
-        model_number=updated_phone.model_number
-    )
+    log_details = f"Ремонт завершен. Работы: {finish_data.work_performed}."
 
-async def finish_warranty_repair(db: AsyncSession, phone_id: int, finish_data: schemas.WarrantyRepairFinish, user_id: int):
-    """Завершает ремонт, обновляет запись и создает лог."""
-    phone = await db.get(models.Phones, phone_id)
-    if not phone or phone.commercial_status != models.CommerceStatus.ГАРАНТИЙНЫЙ_РЕМОНТ:
-        raise HTTPException(status_code=400, detail="Телефон не находится в гарантийном ремонте")
-
-    # Находим последнюю активную запись о ремонте для этого телефона
-    repair_record_result = await db.execute(
-        select(models.WarrantyRepair)
-        .filter_by(phone_id=phone_id, date_returned=None)
-        .order_by(models.WarrantyRepair.date_accepted.desc())
-    )
-    repair_record = repair_record_result.scalars().first()
-
-    if repair_record:
-        repair_record.date_returned = datetime.now()
-        repair_record.work_performed = finish_data.work_performed
-
-    phone.commercial_status = models.CommerceStatus.ПРОДАН
+    if repair_record.repair_type == models.RepairType.ПЛАТНЫЙ:
+        repair_record.payment_status = models.StatusPay.ОЖИДАНИЕ_ОПЛАТЫ
+        log_details += f" Итоговая стоимость: {finish_data.final_cost or 0} руб. Ожидается оплата."
+    else:
+        repair_record.phone.commercial_status = models.CommerceStatus.ПРОДАН
+    
+    if finish_data.service_cost and finish_data.service_cost > 0 and finish_data.expense_account_id:
+            cash_flow_entry = models.CashFlow(
+                date=datetime.now(),
+                operation_categories_id=5, # ПРЕДПОЛАГАЕМ, ЧТО ID 5 = "Ремонтные работы (Расход)"
+                account_id=finish_data.expense_account_id,
+                amount=-abs(finish_data.service_cost), # Расход всегда отрицательный
+                description=f"Оплата мастеру за ремонт №{repair_id} (S/N: {repair_record.phone.serial_number})",
+                currency_id=1
+            )
+            db.add(cash_flow_entry)
+            log_details += f" Себестоимость: {finish_data.service_cost} руб."
     
     log_entry = models.PhoneMovementLog(
-        phone_id=phone.id,
+        phone_id=repair_record.phone.id, user_id=user_id,
+        event_type=models.PhoneEventType.ПОЛУЧЕН_ИЗ_РЕМОНТА, details=log_details
+    )
+    db.add(log_entry)
+    
+    await db.commit()
+    return phone_id_to_return
+
+
+async def record_repair_payment(db: AsyncSession, repair_id: int, payment_data: schemas.RepairPayment, user_id: int):
+    """Регистрирует оплату за платный ремонт."""
+    # ИЗМЕНЕНИЕ: Загружаем все связанные данные сразу
+    repair_result = await db.execute(
+        select(models.Repairs).options(
+            selectinload(models.Repairs.phone).options(
+                selectinload(models.Phones.model).selectinload(models.Models.model_name),
+                selectinload(models.Phones.model).selectinload(models.Models.storage),
+                selectinload(models.Phones.model).selectinload(models.Models.color),
+                selectinload(models.Phones.supplier_order)
+            )
+        ).filter(models.Repairs.id == repair_id)
+    )
+    repair = repair_result.scalars().one_or_none()
+
+    if not repair or not repair.phone:
+        raise HTTPException(status_code=404, detail="Запись о ремонте не найдена")
+    if repair.repair_type != models.RepairType.ПЛАТНЫЙ:
+        raise HTTPException(status_code=400, detail="Этот ремонт не является платным")
+    if repair.payment_status == models.StatusPay.ОПЛАЧЕН:
+        raise HTTPException(status_code=400, detail="Этот ремонт уже оплачен")
+
+    # Создаем запись в движении денег
+    cash_flow_entry = models.CashFlow(
+        date=datetime.now(),
+        operation_categories_id=2, # Поступление от продажи/услуг
+        account_id=payment_data.account_id,
+        amount=payment_data.amount,
+        description=f"Оплата за платный ремонт №{repair.id} (S/N: {repair.phone.serial_number})",
+        currency_id=1
+    )
+    db.add(cash_flow_entry)
+
+    # Обновляем статус ремонта и телефона
+    repair.payment_status = models.StatusPay.ОПЛАЧЕН
+    repair.phone.commercial_status = models.CommerceStatus.ПРОДАН
+    
+    # Создаем лог
+    log_entry = models.PhoneMovementLog(
+        phone_id=repair.phone.id,
         user_id=user_id,
         event_type=models.PhoneEventType.ПОЛУЧЕН_ИЗ_РЕМОНТА,
-        details=f"Ремонт завершен. Проведенные работы: {finish_data.work_performed}"
+        details=f"Ремонт №{repair.id} оплачен на сумму {payment_data.amount} руб. Телефон выдан клиенту."
     )
     db.add(log_entry)
     
     await db.commit()
+    
+    return repair.phone
 
-    # Запрашиваем телефон заново со всеми связями для ответа
-    final_phone_result = await db.execute(
-        select(models.Phones).options(
+async def get_phone_by_id_fully_loaded(db: AsyncSession, phone_id: int):
+    """Загружает один телефон со всеми связанными данными для ответов API."""
+    query = (
+        select(models.Phones)
+        .options(
             selectinload(models.Phones.model).options(
                 selectinload(models.Models.model_name),
                 selectinload(models.Models.storage),
                 selectinload(models.Models.color)
             ),
             selectinload(models.Phones.model_number)
-        ).filter(models.Phones.id == phone_id)
+        )
+        .filter(models.Phones.id == phone_id)
     )
-    return final_phone_result.scalars().one()
+    result = await db.execute(query)
+    phone = result.scalars().one_or_none()
+    if not phone:
+        raise HTTPException(status_code=404, detail="Телефон не найден")
+    return phone
+
 
 async def get_replacement_options(db: AsyncSession, model_id: int):
     """Находит на складе телефоны той же модели для обмена."""
@@ -1747,8 +1918,12 @@ async def get_grouped_phones_in_stock(db: AsyncSession):
             models.Phones.model_id,
             func.count(models.Phones.id).label("quantity")
         )
+        # VVV ДОБАВЬТЕ ЭТОТ JOIN VVV
+        .join(models.Warehouse, (models.Phones.id == models.Warehouse.product_id) & (models.Warehouse.product_type_id == 1))
         .where(
             models.Phones.commercial_status == models.CommerceStatus.НА_СКЛАДЕ,
+            # VVV И ЭТОТ ФИЛЬТР VVV
+            models.Warehouse.storage_location != models.EnumShop.ПОДМЕННЫЙ_ФОНД,
             models.Phones.model_id.is_not(None)
         )
         .group_by(models.Phones.model_id)
@@ -1793,7 +1968,8 @@ async def get_phones_ready_for_packaging(db: AsyncSession):
             selectinload(models.Phones.model).selectinload(models.Models.model_name),
             selectinload(models.Phones.model).selectinload(models.Models.storage),
             selectinload(models.Phones.model).selectinload(models.Models.color),
-            selectinload(models.Phones.model_number)
+            selectinload(models.Phones.model_number),
+            selectinload(models.Phones.supplier_order) # <--- ДОБАВЬТЕ ЭТУ СТРОКУ
         )
         .filter(models.Phones.technical_status == models.TechStatus.НА_УПАКОВКЕ)
     )
@@ -1811,7 +1987,8 @@ async def package_phones(db: AsyncSession, phone_ids: List[int], user_id: int):
                 selectinload(models.Models.storage),
                 selectinload(models.Models.color)
             ),
-            selectinload(models.Phones.model_number)
+            selectinload(models.Phones.model_number),
+            selectinload(models.Phones.supplier_order) 
         )
         .filter(models.Phones.id.in_(phone_ids))
     )
@@ -1949,7 +2126,8 @@ async def get_all_phones_in_stock_detailed(db: AsyncSession):
             selectinload(models.Phones.model).selectinload(models.Models.model_name),
             selectinload(models.Phones.model).selectinload(models.Models.storage),
             selectinload(models.Phones.model).selectinload(models.Models.color),
-            selectinload(models.Phones.model_number)
+            selectinload(models.Phones.model_number),
+            selectinload(models.Phones.supplier_order) # <--- ДОБАВЬТЕ ЭТУ СТРОКУ
         )
         .filter(models.Phones.commercial_status == models.CommerceStatus.НА_СКЛАДЕ)
         .order_by(models.Phones.id.desc())
@@ -1994,7 +2172,8 @@ async def move_phone_location(db: AsyncSession, phone_id: int, new_location: mod
                 selectinload(models.Models.storage),
                 selectinload(models.Models.color)
             ),
-            selectinload(models.Phones.model_number)
+            selectinload(models.Phones.model_number),
+            selectinload(models.Phones.supplier_order) # <--- ДОБАВЬТЕ ЭТУ СТРОКУ
         )
         .filter(models.Phones.id == phone_id)
     )
@@ -2010,3 +2189,95 @@ async def move_phone_location(db: AsyncSession, phone_id: int, new_location: mod
     updated_phone.storage_location = location_value.value if location_value else None
     
     return updated_phone
+
+async def get_available_for_loaner(db: AsyncSession):
+    """Получает список телефонов, доступных для выдачи в подменный фонд."""
+    query = (
+        select(models.Phones)
+        .join(models.Warehouse, (models.Phones.id == models.Warehouse.product_id) & (models.Warehouse.product_type_id == 1))
+        .options(
+            selectinload(models.Phones.model).selectinload(models.Models.model_name),
+            selectinload(models.Phones.model).selectinload(models.Models.storage),
+            selectinload(models.Phones.model).selectinload(models.Models.color)
+        )
+        .filter(models.Warehouse.storage_location == models.EnumShop.ПОДМЕННЫЙ_ФОНД)
+        .filter(models.Phones.commercial_status == models.CommerceStatus.НА_СКЛАДЕ)
+        .order_by(models.Phones.id.desc())
+    )
+    result = await db.execute(query)
+    return result.scalars().all()
+
+async def issue_loaner(db: AsyncSession, repair_id: int, loaner_phone_id: int, user_id: int):
+    """Выдает подменный телефон и меняет его статус."""
+    loaner_phone = await db.get(models.Phones, loaner_phone_id)
+    if not loaner_phone or loaner_phone.commercial_status != models.CommerceStatus.НА_СКЛАДЕ:
+        raise HTTPException(status_code=400, detail="Этот телефон нельзя выдать, он не на складе.")
+
+    # Меняем статус подменного телефона
+    loaner_phone.commercial_status = models.CommerceStatus.ПОДМЕННЫЙ_ФОНД
+
+    # Создаем запись в логе выдачи
+    new_log = models.LoanerLog(
+        repair_id=repair_id,
+        loaner_phone_id=loaner_phone_id,
+        user_id=user_id
+    )
+    db.add(new_log)
+
+    # Создаем запись в истории самого подменного телефона
+    history_log = models.PhoneMovementLog(
+        phone_id=loaner_phone_id,
+        user_id=user_id,
+        event_type=models.PhoneEventType.ВЫДАН_КАК_ПОДМЕННЫЙ,
+        details=f"Выдан как подменный телефон по ремонту №{repair_id}"
+    )
+    db.add(history_log)
+    await db.commit()
+    return new_log
+
+async def return_loaner(db: AsyncSession, loaner_log_id: int, user_id: int):
+    """Принимает подменный телефон обратно на склад."""
+    log_entry = await db.get(models.LoanerLog, loaner_log_id, options=[selectinload(models.LoanerLog.loaner_phone)])
+    if not log_entry or not log_entry.loaner_phone:
+        raise HTTPException(status_code=404, detail="Запись о выдаче не найдена.")
+
+    # Обновляем запись о выдаче
+    log_entry.date_returned = datetime.now()
+
+    # Возвращаем телефон на склад для повторной проверки
+    phone = log_entry.loaner_phone
+    phone.commercial_status = models.CommerceStatus.НЕ_ГОТОВ_К_ПРОДАЖЕ
+    phone.technical_status = models.TechStatus.ОЖИДАЕТ_ПРОВЕРКУ
+
+    # Создаем запись в истории
+    history_log = models.PhoneMovementLog(
+        phone_id=phone.id,
+        user_id=user_id,
+        event_type=models.PhoneEventType.ПРИНЯТ_ИЗ_ПОДМЕНЫ, # Используем новое короткое название
+        details=f"Возвращен из подменного фонда после ремонта №{log_entry.repair_id}. Отправлен на инспекцию."
+    )
+    db.add(history_log)
+    await db.commit()
+    return log_entry
+
+async def get_phone_by_id_fully_loaded(db: AsyncSession, phone_id: int):
+    """Безопасно загружает один телефон со всеми связанными данными для ответов API."""
+    query = (
+        select(models.Phones)
+        .options(
+            selectinload(models.Phones.model).options(
+                selectinload(models.Models.model_name),
+                selectinload(models.Models.storage),
+                selectinload(models.Models.color)
+            ),
+            selectinload(models.Phones.model_number),
+            selectinload(models.Phones.supplier_order)
+        )
+        .filter(models.Phones.id == phone_id)
+    )
+    result = await db.execute(query)
+    phone = result.scalars().one_or_none()
+    if not phone:
+        raise HTTPException(status_code=404, detail="Телефон не найден")
+    return phone
+

@@ -32,6 +32,7 @@ class CommerceStatus(PyEnum):
     ГАРАНТИЙНЫЙ_РЕМОНТ = "ГАРАНТИЙНЫЙ_РЕМОНТ" # <--- ИЗМЕНЕНО
     ОТПРАВЛЕН_ПОСТАВЩИКУ = "ОТПРАВЛЕН_ПОСТАВЩИКУ" # <--- ИЗМЕНЕНО
     СПИСАН_ПОСТАВЩИКОМ = "СПИСАН_ПОСТАВЩИКОМ" 
+    ПОДМЕННЫЙ_ФОНД = "ПОДМЕННЫЙ_ФОНД"
 
 
 class StatusDelivery(PyEnum):
@@ -43,6 +44,7 @@ class StatusDelivery(PyEnum):
 class EnumShop(PyEnum):
     СКЛАД = "СКЛАД"
     ВИТРИНА = "ВИТРИНА"
+    ПОДМЕННЫЙ_ФОНД = "ПОДМЕННЫЙ_ФОНД"
 
 
 class EnumPayment(PyEnum):
@@ -81,6 +83,12 @@ class PhoneEventType(PyEnum):
     ПОЛУЧЕН_ИЗ_РЕМОНТА = "ПОЛУЧЕН_ИЗ_РЕМОНТА"
     ОБМЕНЕН = "ОБМЕНЕН"    
     ПЕРЕМЕЩЕНИЕ = "ПЕРЕМЕЩЕНИЕ"
+    ВЫДАН_КАК_ПОДМЕННЫЙ = "ВЫДАН_КАК_ПОДМЕННЫЙ" 
+    ПРИНЯТ_ИЗ_ПОДМЕНЫ = "ПРИНЯТ_ИЗ_ПОДМЕНЫ"
+
+class RepairType(PyEnum):
+    ГАРАНТИЙНЫЙ = "ГАРАНТИЙНЫЙ"
+    ПЛАТНЫЙ = "ПЛАТНЫЙ"
 
 
 # Model definitions
@@ -187,6 +195,7 @@ class Phones(Base):
     model_number: Mapped[Optional["ModelNumber"]] = relationship("ModelNumber", back_populates="phones")
     device_inspections: Mapped[List["DeviceInspection"]] = relationship("DeviceInspection", back_populates="phone")
     movement_logs: Mapped[List["PhoneMovementLog"]] = relationship("PhoneMovementLog", back_populates="phone")
+    repairs: Mapped[List["Repairs"]] = relationship("Repairs", back_populates="phone")
 
 
 class Roles(Base):
@@ -548,32 +557,34 @@ class WaitingRoom(Base):
     # Relationships
     accessory: Mapped[Optional["Accessories"]] = relationship("Accessories", back_populates="waiting_rooms")
 
-class WarrantyRepair(Base):
-    __tablename__ = "warranty_repairs"
+class Repairs(Base):
+    __tablename__ = "repairs" # Таблица будет переименована
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    
-    # Связи
     phone_id: Mapped[int] = mapped_column(Integer, ForeignKey("phones.id"))
-    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id")) # Сотрудник, принявший в ремонт
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
 
-    # Данные акта приема
+    # Новые поля для типа и стоимости ремонта
+    repair_type: Mapped[RepairType] = mapped_column(Enum(RepairType, native_enum=False))
+    estimated_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric, nullable=True)
+    final_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric, nullable=True)
+    service_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric, nullable=True)
+    payment_status: Mapped[Optional[StatusPay]] = mapped_column(Enum(StatusPay, native_enum=False), nullable=True)
+
+    # Старые поля
     date_accepted: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     customer_name: Mapped[str] = mapped_column(String(255))
     customer_phone: Mapped[str] = mapped_column(String(50))
-    problem_description: Mapped[str] = mapped_column(Text) # Со слов клиента
-    device_condition: Mapped[str] = mapped_column(Text) # Внешнее состояние
-    included_items: Mapped[Optional[str]] = mapped_column(Text) # Комплектация
-    notes: Mapped[Optional[str]] = mapped_column(Text) # Дополнительные примечания
-
-    # Данные акта выдачи (заполняются позже)
+    problem_description: Mapped[str] = mapped_column(Text)
+    device_condition: Mapped[str] = mapped_column(Text)
+    included_items: Mapped[Optional[str]] = mapped_column(Text)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
     date_returned: Mapped[Optional[datetime]] = mapped_column(DateTime)
-    work_performed: Mapped[Optional[str]] = mapped_column(Text) # Проведенные работы
+    work_performed: Mapped[Optional[str]] = mapped_column(Text)
 
-    # Отношения для удобного доступа
     phone: Mapped["Phones"] = relationship("Phones")
     user: Mapped["Users"] = relationship("Users")
-
+    loaner_logs: Mapped[list["LoanerLog"]] = relationship("LoanerLog", back_populates="repair")
 
 class Notes(Base):
     __tablename__ = "notes"
@@ -800,3 +811,20 @@ class TrafficSource(Base):
         foreign_keys="[Customers.source_id]", # <-- ДОБАВЬТЕ ЭТУ СТРОКУ
         back_populates="source"
     )
+
+class LoanerLog(Base):
+    __tablename__ = "loaner_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    repair_id: Mapped[int] = mapped_column(Integer, ForeignKey("repairs.id"))
+    loaner_phone_id: Mapped[int] = mapped_column(Integer, ForeignKey("phones.id"))
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
+    
+    date_issued: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    date_returned: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+    # Связи для удобного доступа
+    repair: Mapped["Repairs"] = relationship("Repairs")
+    loaner_phone: Mapped["Phones"] = relationship("Phones")
+    user: Mapped["Users"] = relationship("Users")
+
