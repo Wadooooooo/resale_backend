@@ -705,4 +705,15 @@ class PayrollPaymentCreate(BaseModel):
     amount: Decimal
     account_id: int
     notes: Optional[str] = None
-    
+
+class FinancialSnapshotSchema(BaseModel):
+    id: int
+    snapshot_date: date
+    cash_balance: Decimal
+    inventory_value: Decimal
+    goods_in_transit_value: Decimal
+    total_assets: Decimal
+
+    class Config:
+        from_attributes = True
+

@@ -2246,3 +2246,20 @@ async def pay_salary_endpoint(
     
     await crud.create_payroll_payment(db=db, user_id=user_id, payment_data=payment_data)
     return {"status": "success", "message": "Выплата успешно проведена."}
+
+@app.get("/api/v1/reports/financial-snapshots",
+         response_model=List[schemas.FinancialSnapshotSchema],
+         tags=["Reports"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_financial_snapshots(db: AsyncSession = Depends(get_db)):
+    """Получает историю всех финансовых срезов."""
+    return await crud.get_financial_snapshots(db=db)
+
+@app.post("/api/v1/reports/financial-snapshots",
+          response_model=schemas.FinancialSnapshotSchema,
+          tags=["Reports"],
+          dependencies=[Depends(security.require_permission("view_reports"))])
+async def create_new_financial_snapshot(db: AsyncSession = Depends(get_db)):
+    """Создает новый финансовый срез на текущую дату."""
+    return await crud.create_financial_snapshot(db=db)
+

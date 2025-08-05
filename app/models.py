@@ -2,6 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum as PyEnum
 from typing import List, Optional, Union
+from sqlalchemy.dialects.postgresql import JSONB
 
 from sqlalchemy import (
     Boolean, Date, DateTime, ForeignKey, Integer, 
@@ -854,3 +855,15 @@ class Payroll(Base):
     user: Mapped["Users"] = relationship("Users")
     account: Mapped["Accounts"] = relationship("Accounts")
 
+class FinancialSnapshot(Base):
+    __tablename__ = "financial_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, unique=True, default=date.today)
+    
+    cash_balance: Mapped[Decimal] = mapped_column(Numeric, default=0)
+    inventory_value: Mapped[Decimal] = mapped_column(Numeric, default=0)
+    goods_in_transit_value: Mapped[Decimal] = mapped_column(Numeric, default=0)
+    total_assets: Mapped[Decimal] = mapped_column(Numeric, default=0)
+    
+    details: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True) # Для хранения деталей расчета

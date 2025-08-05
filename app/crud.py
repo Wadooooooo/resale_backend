@@ -2508,3 +2508,64 @@ async def create_payroll_payment(db: AsyncSession, user_id: int, payment_data: s
     await db.refresh(new_payroll_entry)
     return new_payroll_entry
 
+async def get_financial_snapshots(db: AsyncSession):
+    """Получает все финансовые срезы, отсортированные по дате."""
+    result = await db.execute(
+        select(models.FinancialSnapshot).order_by(models.FinancialSnapshot.snapshot_date.desc())
+    )
+    return result.scalars().all()
+
+async def create_financial_snapshot(db: AsyncSession):
+    """Создает снимок финансового состояния компании на текущий момент."""
+    today = date.today()
+    
+    # Проверяем, не был ли уже сделан срез сегодня
+    existing_snapshot = await db.execute(
+        select(models.FinancialSnapshot).filter_by(snapshot_date=today)
+    )
+    if existing_snapshot.scalars().first():
+        raise HTTPException(status_code=400, detail="Финансовый срез на сегодняшнюю дату уже существует.")
+
+    # 1. Считаем баланс наличных
+    cash_balance = await get_total_balance(db)
+
+    # 2. Считаем стоимость склада (телефоны в наличии + в подменном фонде)
+    inventory_value_res = await db.execute(
+        select(func.sum(models.Phones.purchase_price)).where(
+            models.Phones.commercial_status.in_([
+                models.CommerceStatus.НА_СКЛАДЕ,
+                models.CommerceStatus.ПОДМЕННЫЙ_ФОНД
+            ])
+        )
+    )
+    inventory_value = inventory_value_res.scalar_one_or_none() or Decimal('0')
+
+    # 3. Считаем стоимость товаров в пути (оплачены, но не получены)
+    goods_in_transit_res = await db.execute(
+        select(func.sum(models.SupplierOrderDetails.price * models.SupplierOrderDetails.quantity))
+        .join(models.SupplierOrders)
+        .where(
+            models.SupplierOrders.payment_status == models.OrderPaymentStatus.ОПЛАЧЕН,
+            models.SupplierOrders.status != models.StatusDelivery.ПОЛУЧЕН
+        )
+    )
+    goods_in_transit_value = goods_in_transit_res.scalar_one_or_none() or Decimal('0')
+
+    # 4. Считаем общую стоимость активов
+    total_assets = cash_balance + inventory_value + goods_in_transit_value
+
+    # 5. Создаем и сохраняем срез
+    new_snapshot = models.FinancialSnapshot(
+        snapshot_date=today,
+        cash_balance=cash_balance,
+        inventory_value=inventory_value,
+        goods_in_transit_value=goods_in_transit_value,
+        total_assets=total_assets,
+        details={} # Можно будет добавить детализацию в будущем
+    )
+    db.add(new_snapshot)
+    await db.commit()
+    await db.refresh(new_snapshot)
+    
+    return new_snapshot
+
