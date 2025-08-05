@@ -479,6 +479,8 @@ class Sales(Base):
     account_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("accounts.id"))
     payment_status: Mapped[Optional[StatusPay]] = mapped_column(Enum(StatusPay, native_enum=False))
     total_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric)
+    cash_received: Mapped[Optional[Decimal]] = mapped_column(Numeric, nullable=True)
+    change_given: Mapped[Optional[Decimal]] = mapped_column(Numeric, nullable=True)
     currency_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("currency.id"))
     user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
     notes: Mapped[Optional[str]] = mapped_column(Text)

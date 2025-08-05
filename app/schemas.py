@@ -349,6 +349,8 @@ class SaleCreate(BaseModel):
     details: List[SaleDetailCreate]
     account_id: Optional[int] = None
     discount: Optional[Decimal] = None
+    cash_received: Optional[Decimal] = None
+    change_given: Optional[Decimal] = None
 
 # --- Схемы для ответа от сервера ---
 

@@ -882,16 +882,11 @@ async def get_products_for_sale(db: AsyncSession):
     return final_warehouse_items
 
 async def create_sale(db: AsyncSession, sale_data: schemas.SaleCreate, user_id: int):
-    """Создает новую продажу, обновляет остатки, учитывает скидку и рассчитывает прибыль."""
-
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # 1. Считаем сумму до скидки (субтотал)
-    subtotal = sum(item.unit_price * item.quantity for item in sale_data.details)
+    """Создает новую продажу, обновляет остатки, учитывает сдачу и рассчитывает прибыль."""
     
-    # 2. Вычисляем итоговую сумму с учетом скидки
+    subtotal = sum(item.unit_price * item.quantity for item in sale_data.details)
     discount_amount = sale_data.discount or Decimal('0')
     total_amount = subtotal - discount_amount
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     if not sale_data.account_id:
         raise HTTPException(status_code=400, detail="Не указан счет для проведения операции.")
@@ -900,8 +895,11 @@ async def create_sale(db: AsyncSession, sale_data: schemas.SaleCreate, user_id: 
         sale_date=datetime.now(),
         customer_id=sale_data.customer_id,
         payment_method=models.EnumPayment(sale_data.payment_method),
-        total_amount=total_amount, # <-- Используем новую итоговую сумму
-        discount=discount_amount, # <-- Сохраняем скидку
+        total_amount=total_amount,
+        discount=discount_amount,
+        # VVV СОХРАНЯЕМ НОВЫЕ ДАННЫЕ VVV
+        cash_received=sale_data.cash_received,
+        change_given=sale_data.change_given,
         payment_status=models.StatusPay.ОПЛАЧЕН,
         user_id=user_id,
         notes=sale_data.notes,
@@ -910,8 +908,44 @@ async def create_sale(db: AsyncSession, sale_data: schemas.SaleCreate, user_id: 
     db.add(new_sale)
     await db.flush()
 
+    # Основная транзакция поступления от продажи
+    amount_for_cash_flow = total_amount
+    description_for_cash_flow = f"Поступление от продажи №{new_sale.id}"
+
+    # Если оплата наличными и клиент не забрал сдачу
+    if sale_data.payment_method == 'НАЛИЧНЫЕ' and sale_data.cash_received and not sale_data.change_given:
+        # Фактическое поступление в кассу - это вся сумма, которую дал клиент
+        amount_for_cash_flow = sale_data.cash_received
+        # Добавляем в описание информацию об оставленной сдаче
+        change_left = sale_data.cash_received - total_amount
+        if change_left > 0:
+            description_for_cash_flow += f". Клиент оставил сдачу: {change_left} руб."
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    # Основная транзакция поступления от продажи
+    cash_flow_entry = models.CashFlow(
+        date=datetime.now(),
+        operation_categories_id=2, # Поступление от продажи/услуг
+        account_id=sale_data.account_id,
+        amount=amount_for_cash_flow, # Используем новую, фактическую сумму
+        description=description_for_cash_flow, # Используем новое описание
+        currency_id=1
+    )
+    db.add(cash_flow_entry)
+
+    # VVV НОВАЯ ЛОГИКА: Создаем транзакцию для сдачи, если она есть VVV
+    if sale_data.change_given and sale_data.change_given > 0:
+        change_cash_flow_entry = models.CashFlow(
+            date=datetime.now(),
+            operation_categories_id=7, # Предполагаем, что ID 7 = "Прочие расходы" или "Выдача сдачи"
+            account_id=sale_data.account_id, # Сдача выдается с того же счета (кассы)
+            amount=-abs(sale_data.change_given), # Расход
+            description=f"Сдача по продаже №{new_sale.id}",
+            currency_id=1
+        )
+        db.add(change_cash_flow_entry)
+        
     for detail in sale_data.details:
-        # ... (весь остальной код внутри цикла for остается без изменений)
         warehouse_item = await db.get(models.Warehouse, detail.warehouse_id)
         if not warehouse_item or warehouse_item.quantity < detail.quantity:
             await db.rollback()
@@ -924,25 +958,18 @@ async def create_sale(db: AsyncSession, sale_data: schemas.SaleCreate, user_id: 
             phone = await db.get(models.Phones, warehouse_item.product_id)
             if phone:
                 phone.commercial_status = models.CommerceStatus.ПРОДАН
-                
                 customer_name = "Розничный покупатель"
                 if new_sale.customer_id:
                     customer = await db.get(models.Customers, new_sale.customer_id)
-                    if customer:
-                        customer_name = customer.name
-                
+                    if customer: customer_name = customer.name
                 log_entry = models.PhoneMovementLog(
-                    phone_id=phone.id,
-                    user_id=user_id,
+                    phone_id=phone.id, user_id=user_id,
                     event_type=models.PhoneEventType.ПРОДАН,
                     details=f"Продажа №{new_sale.id} клиенту '{customer_name}'. Цена: {detail.unit_price} руб."
                 )
                 db.add(log_entry)
-                
                 purchase_price = phone.purchase_price or 0
-                prep_and_seller_costs = 800
-                profit_per_unit = detail.unit_price - purchase_price - prep_and_seller_costs
-                item_profit = profit_per_unit * detail.quantity
+                item_profit = (detail.unit_price * detail.quantity) - (purchase_price * detail.quantity) - Decimal(800)
 
         elif warehouse_item.product_type_id == 2: # Аксессуар
             accessory = await db.get(models.Accessories, warehouse_item.product_id)
@@ -951,23 +978,10 @@ async def create_sale(db: AsyncSession, sale_data: schemas.SaleCreate, user_id: 
                 item_profit = (detail.unit_price * detail.quantity) - (purchase_price * detail.quantity)
 
         sale_detail_entry = models.SaleDetails(
-            sale_id=new_sale.id,
-            warehouse_id=detail.warehouse_id,
-            quantity=detail.quantity,
-            unit_price=detail.unit_price,
-            profit=item_profit
+            sale_id=new_sale.id, warehouse_id=detail.warehouse_id, quantity=detail.quantity,
+            unit_price=detail.unit_price, profit=item_profit
         )
         db.add(sale_detail_entry)
-
-    cash_flow_entry = models.CashFlow(
-        date=datetime.now(),
-        operation_categories_id=2,
-        account_id=sale_data.account_id,
-        amount=total_amount, # <-- В движение денег идет итоговая сумма
-        description=f"Поступление от продажи №{new_sale.id}",
-        currency_id=1
-    )
-    db.add(cash_flow_entry)
     
     await db.commit()
     await db.refresh(new_sale, attribute_names=['sale_details'])
