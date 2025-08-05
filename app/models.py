@@ -859,7 +859,7 @@ class FinancialSnapshot(Base):
     __tablename__ = "financial_snapshots"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    snapshot_date: Mapped[date] = mapped_column(Date, unique=True, default=date.today)
+    snapshot_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     
     cash_balance: Mapped[Decimal] = mapped_column(Numeric, default=0)
     inventory_value: Mapped[Decimal] = mapped_column(Numeric, default=0)

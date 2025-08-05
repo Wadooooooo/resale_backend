@@ -708,7 +708,7 @@ class PayrollPaymentCreate(BaseModel):
 
 class FinancialSnapshotSchema(BaseModel):
     id: int
-    snapshot_date: date
+    snapshot_date: datetime
     cash_balance: Decimal
     inventory_value: Decimal
     goods_in_transit_value: Decimal
