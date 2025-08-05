@@ -2216,28 +2216,9 @@ async def return_loaner_phone_endpoint(
     await crud.return_loaner(db, loaner_log_id=log_id, user_id=current_user.id)
     return {"status": "success", "message": "Loaner phone returned."}
 
-class PayrollDetailItem(BaseModel):
-    count: int
-    rate: Decimal
-    total: Decimal
-
-class PayrollBreakdown(BaseModel):
-    inspections: Optional[PayrollDetailItem] = None
-    battery_tests: Optional[PayrollDetailItem] = None
-    packaging: Optional[PayrollDetailItem] = None
-    shifts: Optional[PayrollDetailItem] = None
-    phone_sales_bonus: Optional[PayrollDetailItem] = None
-
-class PayrollReportItem(BaseModel):
-    user_id: int
-    username: str
-    name: str
-    role: str
-    breakdown: PayrollBreakdown
-    total_salary: Decimal
 
 @app.get("/api/v1/reports/payroll", 
-         response_model=List[PayrollReportItem],
+         response_model=List[schemas.PayrollReportItem],
          tags=["Reports"],
          dependencies=[Depends(security.require_permission("view_reports"))])
 async def get_payroll_report_endpoint(
@@ -2250,3 +2231,18 @@ async def get_payroll_report_endpoint(
         raise HTTPException(status_code=400, detail="Дата начала не может быть позже даты окончания.")
         
     return await crud.get_payroll_report(db=db, start_date=start_date, end_date=end_date)
+
+@app.post("/api/v1/reports/payroll/pay", 
+          tags=["Reports"],
+          dependencies=[Depends(security.require_permission("manage_cashflow"))])
+async def pay_salary_endpoint(
+    payment_data: schemas.PayrollPaymentCreate,
+    user_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Проводит выплату зарплаты сотруднику."""
+    if payment_data.amount <= 0:
+        raise HTTPException(status_code=400, detail="Сумма выплаты должна быть положительной.")
+    
+    await crud.create_payroll_payment(db=db, user_id=user_id, payment_data=payment_data)
+    return {"status": "success", "message": "Выплата успешно проведена."}

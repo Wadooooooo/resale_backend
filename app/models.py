@@ -838,4 +838,17 @@ class EmployeeShifts(Base):
     shift_end: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
     user: Mapped["Users"] = relationship("Users")
-    
+
+class Payroll(Base):
+    __tablename__ = "payroll"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
+    payment_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    amount: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id"))
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+
+    user: Mapped["Users"] = relationship("Users")
+    account: Mapped["Accounts"] = relationship("Accounts")
+

@@ -675,3 +675,32 @@ class ActiveLoanerLog(BaseModel):
         from_attributes = True
 
 
+# --- Схемы для отчета по Зарплатам ---
+
+class PayrollDetailItem(BaseModel):
+    count: int
+    rate: Decimal
+    total: Decimal
+
+class PayrollBreakdown(BaseModel):
+    inspections: Optional[PayrollDetailItem] = None
+    battery_tests: Optional[PayrollDetailItem] = None
+    packaging: Optional[PayrollDetailItem] = None
+    shifts: Optional[PayrollDetailItem] = None
+    phone_sales_bonus: Optional[PayrollDetailItem] = None
+
+class PayrollReportItem(BaseModel):
+    user_id: int
+    username: str
+    name: str
+    role: str
+    breakdown: PayrollBreakdown
+    total_earned: Decimal
+    total_paid: Decimal
+    balance: Decimal
+
+class PayrollPaymentCreate(BaseModel):
+    amount: Decimal
+    account_id: int
+    notes: Optional[str] = None
+    
