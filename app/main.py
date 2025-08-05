@@ -2118,6 +2118,36 @@ async def get_dashboard_ready_for_sale(
     phones = result.scalars().all()
     return [_format_phone_response(p) for p in phones]
 
+class ShiftResponse(BaseModel):
+    id: int
+    shift_start: datetime
+    shift_end: Optional[datetime] = None
+
+@app.get("/api/v1/shifts/active", response_model=Optional[ShiftResponse], tags=["Shifts"])
+async def get_user_active_shift(
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Проверяет, есть ли у текущего пользователя активная смена."""
+    active_shift = await crud.get_active_shift(db, user_id=current_user.id)
+    return active_shift
+
+@app.post("/api/v1/shifts/start", response_model=ShiftResponse, tags=["Shifts"])
+async def start_user_shift(
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Начинает новую смену для текущего пользователя."""
+    return await crud.start_shift(db, user_id=current_user.id)
+
+@app.put("/api/v1/shifts/end", response_model=ShiftResponse, tags=["Shifts"])
+async def end_user_shift(
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Завершает активную смену для текущего пользователя."""
+    return await crud.end_shift(db, user_id=current_user.id)
+
 
 # --- Эндпоинты для Заметок ---
 
@@ -2186,3 +2216,37 @@ async def return_loaner_phone_endpoint(
     await crud.return_loaner(db, loaner_log_id=log_id, user_id=current_user.id)
     return {"status": "success", "message": "Loaner phone returned."}
 
+class PayrollDetailItem(BaseModel):
+    count: int
+    rate: Decimal
+    total: Decimal
+
+class PayrollBreakdown(BaseModel):
+    inspections: Optional[PayrollDetailItem] = None
+    battery_tests: Optional[PayrollDetailItem] = None
+    packaging: Optional[PayrollDetailItem] = None
+    shifts: Optional[PayrollDetailItem] = None
+    phone_sales_bonus: Optional[PayrollDetailItem] = None
+
+class PayrollReportItem(BaseModel):
+    user_id: int
+    username: str
+    name: str
+    role: str
+    breakdown: PayrollBreakdown
+    total_salary: Decimal
+
+@app.get("/api/v1/reports/payroll", 
+         response_model=List[PayrollReportItem],
+         tags=["Reports"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def get_payroll_report_endpoint(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db)
+):
+    """Формирует и возвращает зарплатный отчет за период."""
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="Дата начала не может быть позже даты окончания.")
+        
+    return await crud.get_payroll_report(db=db, start_date=start_date, end_date=end_date)

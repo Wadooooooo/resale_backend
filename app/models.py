@@ -829,3 +829,13 @@ class LoanerLog(Base):
     loaner_phone: Mapped["Phones"] = relationship("Phones")
     user: Mapped["Users"] = relationship("Users")
 
+class EmployeeShifts(Base):
+    __tablename__ = "employee_shifts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
+    shift_start: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    shift_end: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+    user: Mapped["Users"] = relationship("Users")
+    

@@ -16,6 +16,7 @@ from sqlalchemy import func
 from typing import List, Optional
 from sqlalchemy import update
 from . import security
+from sqlalchemy import extract
 
 
 BATTERY_THRESHOLDS = {
@@ -2356,4 +2357,125 @@ async def get_phone_by_id_fully_loaded_with_location(db: AsyncSession, phone_id:
     phone, location = phone_with_location
     phone.storage_location = location.value if location else None
     return phone
+
+async def get_payroll_report(db: AsyncSession, start_date: date, end_date: date):
+    """Собирает и рассчитывает данные для зарплатного отчета для всех ролей."""
+    
+    users_result = await db.execute(
+        select(models.Users).options(selectinload(models.Users.role))
+        .join(models.Users.role)
+        .filter(models.Roles.role_name.in_(['Продавец', 'Тех. специалист', 'Администратор']))
+    )
+    users = users_result.scalars().all()
+
+    report = []
+    end_date_inclusive = end_date + timedelta(days=1)
+
+    for user in users:
+        total_salary = Decimal(0)
+        breakdown = {}
+
+        # --- РАСЧЕТ ДЛЯ ТЕХ. СПЕЦИАЛИСТА (считается для всех) ---
+        inspections_count_res = await db.execute(
+            select(func.count(models.DeviceInspection.id))
+            .filter(models.DeviceInspection.user_id == user.id)
+            .filter(models.DeviceInspection.inspection_date >= start_date, models.DeviceInspection.inspection_date < end_date_inclusive)
+        )
+        inspections_count = inspections_count_res.scalar_one()
+
+        battery_tests_count_res = await db.execute(
+            select(func.count(models.BatteryTest.id)).join(models.DeviceInspection)
+            .filter(models.DeviceInspection.user_id == user.id)
+            .filter(models.DeviceInspection.inspection_date >= start_date, models.DeviceInspection.inspection_date < end_date_inclusive)
+        )
+        battery_tests_count = battery_tests_count_res.scalar_one()
+
+        packaging_count_res = await db.execute(
+            select(func.count(models.PhoneMovementLog.id))
+            .filter(models.PhoneMovementLog.user_id == user.id)
+            .filter(models.PhoneMovementLog.details == "Телефон упакован и готов к приемке на склад.")
+            .filter(models.PhoneMovementLog.timestamp >= start_date, models.PhoneMovementLog.timestamp < end_date_inclusive)
+        )
+        packaging_count = packaging_count_res.scalar_one()
+
+        if inspections_count > 0 or battery_tests_count > 0 or packaging_count > 0:
+            inspection_rate, battery_rate, packaging_rate = Decimal(150), Decimal(50), Decimal(100)
+            inspection_total = inspections_count * inspection_rate
+            battery_total = battery_tests_count * battery_rate
+            packaging_total = packaging_count * packaging_rate
+            
+            breakdown["inspections"] = {"count": inspections_count, "rate": inspection_rate, "total": inspection_total}
+            breakdown["battery_tests"] = {"count": battery_tests_count, "rate": battery_rate, "total": battery_total}
+            breakdown["packaging"] = {"count": packaging_count, "rate": packaging_rate, "total": packaging_total}
+            total_salary += inspection_total + battery_total + packaging_total
+
+        # --- РАСЧЕТ ДЛЯ ПРОДАВЦА (считается для всех) ---
+        shifts_count_res = await db.execute(
+            select(func.count(func.distinct(func.date(models.EmployeeShifts.shift_start))))
+            .filter(models.EmployeeShifts.user_id == user.id)
+            .filter(models.EmployeeShifts.shift_start >= start_date, models.EmployeeShifts.shift_start < end_date_inclusive)
+        )
+        shifts_count = shifts_count_res.scalar_one()
+
+        phones_sold_count_res = await db.execute(
+            select(func.sum(models.SaleDetails.quantity)).join(models.Sales).join(models.Warehouse)
+            .filter(models.Sales.user_id == user.id)
+            .filter(models.Warehouse.product_type_id == 1)
+            .filter(models.Sales.sale_date >= start_date, models.Sales.sale_date < end_date_inclusive)
+        )
+        phones_sold_count = phones_sold_count_res.scalar_one() or 0
+        
+        if shifts_count > 0 or phones_sold_count > 0:
+            shift_rate, bonus_rate = Decimal(2000), Decimal(500)
+            shift_total = shifts_count * shift_rate
+            bonus_total = phones_sold_count * bonus_rate
+
+            breakdown["shifts"] = {"count": shifts_count, "rate": shift_rate, "total": shift_total}
+            breakdown["phone_sales_bonus"] = {"count": phones_sold_count, "rate": bonus_rate, "total": bonus_total}
+            total_salary += shift_total + bonus_total
+
+        # Собираем итоговый отчет для пользователя, только если есть начисления
+        if total_salary > 0:
+            report.append({
+                "user_id": user.id,
+                "username": user.username,
+                "name": f"{user.name or ''} {user.last_name or ''}".strip(),
+                "role": user.role.role_name,
+                "breakdown": breakdown,
+                "total_salary": total_salary
+            })
+
+    return report
+
+async def get_active_shift(db: AsyncSession, user_id: int) -> Optional[models.EmployeeShifts]:
+    """Находит активную (незавершенную) смену для пользователя."""
+    result = await db.execute(
+        select(models.EmployeeShifts)
+        .filter_by(user_id=user_id, shift_end=None)
+        .order_by(models.EmployeeShifts.shift_start.desc())
+    )
+    return result.scalars().first()
+
+async def start_shift(db: AsyncSession, user_id: int) -> models.EmployeeShifts:
+    """Начинает новую смену для пользователя."""
+    active_shift = await get_active_shift(db, user_id)
+    if active_shift:
+        raise HTTPException(status_code=400, detail="У вас уже есть активная смена. Сначала завершите ее.")
+    
+    new_shift = models.EmployeeShifts(user_id=user_id)
+    db.add(new_shift)
+    await db.commit()
+    await db.refresh(new_shift)
+    return new_shift
+
+async def end_shift(db: AsyncSession, user_id: int) -> models.EmployeeShifts:
+    """Завершает активную смену пользователя."""
+    active_shift = await get_active_shift(db, user_id)
+    if not active_shift:
+        raise HTTPException(status_code=404, detail="Нет активной смены для завершения.")
+        
+    active_shift.shift_end = datetime.now()
+    await db.commit()
+    await db.refresh(active_shift)
+    return active_shift
 
