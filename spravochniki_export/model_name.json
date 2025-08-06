@@ -1,0 +1,158 @@
+[
+    {
+        "id": 1,
+        "name": "iPhone 5s"
+    },
+    {
+        "id": 2,
+        "name": "iPhone 6"
+    },
+    {
+        "id": 3,
+        "name": "iPhone 6 Plus"
+    },
+    {
+        "id": 4,
+        "name": "iPhone 6S"
+    },
+    {
+        "id": 5,
+        "name": "iPhone 6S Plus"
+    },
+    {
+        "id": 6,
+        "name": "iPhone SE"
+    },
+    {
+        "id": 7,
+        "name": "iPhone 7"
+    },
+    {
+        "id": 8,
+        "name": "iPhone 7 Plus"
+    },
+    {
+        "id": 9,
+        "name": "iPhone 8"
+    },
+    {
+        "id": 10,
+        "name": "iPhone 8 Plus"
+    },
+    {
+        "id": 11,
+        "name": "iPhone X"
+    },
+    {
+        "id": 12,
+        "name": "iPhone XS"
+    },
+    {
+        "id": 13,
+        "name": "iPhone XS Max"
+    },
+    {
+        "id": 14,
+        "name": "iPhone XR"
+    },
+    {
+        "id": 15,
+        "name": "iPhone 11"
+    },
+    {
+        "id": 16,
+        "name": "iPhone 11 Pro"
+    },
+    {
+        "id": 17,
+        "name": "iPhone 11 Pro Max"
+    },
+    {
+        "id": 18,
+        "name": "iPhone SE 2020"
+    },
+    {
+        "id": 19,
+        "name": "iPhone 12"
+    },
+    {
+        "id": 20,
+        "name": "iPhone 12 Mini"
+    },
+    {
+        "id": 21,
+        "name": "iPhone 12 Pro"
+    },
+    {
+        "id": 22,
+        "name": "iPhone 12 Pro Max"
+    },
+    {
+        "id": 23,
+        "name": "iPhone 13"
+    },
+    {
+        "id": 24,
+        "name": "iPhone 13 Mini"
+    },
+    {
+        "id": 25,
+        "name": "iPhone 13 Pro"
+    },
+    {
+        "id": 26,
+        "name": "iPhone 13 Pro Max"
+    },
+    {
+        "id": 27,
+        "name": "iPhone 14"
+    },
+    {
+        "id": 28,
+        "name": "iPhone 14 Plus"
+    },
+    {
+        "id": 29,
+        "name": "iPhone 14 Pro"
+    },
+    {
+        "id": 30,
+        "name": "iPhone 14 Pro Max"
+    },
+    {
+        "id": 31,
+        "name": "iPhone 15"
+    },
+    {
+        "id": 32,
+        "name": "iPhone 15 Plus"
+    },
+    {
+        "id": 33,
+        "name": "iPhone 15 Pro"
+    },
+    {
+        "id": 34,
+        "name": "iPhone 15 Pro Max"
+    },
+    {
+        "id": 35,
+        "name": "iPhone 16"
+    },
+    {
+        "id": 36,
+        "name": "iPhone 16 Plus"
+    },
+    {
+        "id": 37,
+        "name": "iPhone 16 Pro"
+    },
+    {
+        "id": 38,
+        "name": "iPhone 16 Pro Max"
+    },
+    {
+        "id": 39,
+        "name": "iPhone 16e"
+    }
+]

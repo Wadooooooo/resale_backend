@@ -1,0 +1,47 @@
+[
+    {
+        "id": 1,
+        "code": "view_reports",
+        "description": "Просмотр финансовых отчетов"
+    },
+    {
+        "id": 2,
+        "code": "manage_pricing",
+        "description": "Управление розничными ценами"
+    },
+    {
+        "id": 3,
+        "code": "manage_cashflow",
+        "description": "Управление движением денег"
+    },
+    {
+        "id": 4,
+        "code": "perform_sales",
+        "description": "Проведение продаж"
+    },
+    {
+        "id": 5,
+        "code": "manage_inventory",
+        "description": "Управление складом, заказами и инспекциями"
+    },
+    {
+        "id": 6,
+        "code": "manage_users",
+        "description": "Управление сотрудниками"
+    },
+    {
+        "id": 7,
+        "code": "perform_inspections",
+        "description": "Проведение инспекций и тестов"
+    },
+    {
+        "id": 8,
+        "code": "view_purchase_prices",
+        "description": "Просмотр закупочных цен"
+    },
+    {
+        "id": 9,
+        "code": "receive_supplier_orders",
+        "description": "Приёмка заказов от поставщиков"
+    }
+]

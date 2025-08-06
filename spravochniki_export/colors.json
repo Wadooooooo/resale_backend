@@ -1,0 +1,138 @@
+[
+    {
+        "id": 1,
+        "color_name": "Space Grey"
+    },
+    {
+        "id": 2,
+        "color_name": "Gold"
+    },
+    {
+        "id": 3,
+        "color_name": "Silver"
+    },
+    {
+        "id": 4,
+        "color_name": "Rose Gold"
+    },
+    {
+        "id": 5,
+        "color_name": "Black Matte"
+    },
+    {
+        "id": 6,
+        "color_name": "Jet Black"
+    },
+    {
+        "id": 7,
+        "color_name": "Red"
+    },
+    {
+        "id": 8,
+        "color_name": "(PRODUCT) RED"
+    },
+    {
+        "id": 9,
+        "color_name": "Yellow"
+    },
+    {
+        "id": 10,
+        "color_name": "White"
+    },
+    {
+        "id": 11,
+        "color_name": "Black"
+    },
+    {
+        "id": 12,
+        "color_name": "Blue"
+    },
+    {
+        "id": 13,
+        "color_name": "Coral"
+    },
+    {
+        "id": 14,
+        "color_name": "Green"
+    },
+    {
+        "id": 15,
+        "color_name": "Purple "
+    },
+    {
+        "id": 16,
+        "color_name": "Midnight Green"
+    },
+    {
+        "id": 17,
+        "color_name": "Purple"
+    },
+    {
+        "id": 18,
+        "color_name": "Graphite"
+    },
+    {
+        "id": 19,
+        "color_name": "Pacific Blue"
+    },
+    {
+        "id": 20,
+        "color_name": "Starlight "
+    },
+    {
+        "id": 21,
+        "color_name": "Midnight"
+    },
+    {
+        "id": 22,
+        "color_name": "Pink"
+    },
+    {
+        "id": 23,
+        "color_name": "Starlight"
+    },
+    {
+        "id": 24,
+        "color_name": "Sierra Blue"
+    },
+    {
+        "id": 25,
+        "color_name": "Alpine Green"
+    },
+    {
+        "id": 26,
+        "color_name": "Space Black"
+    },
+    {
+        "id": 27,
+        "color_name": "Deep Purple"
+    },
+    {
+        "id": 28,
+        "color_name": "Black Titanium"
+    },
+    {
+        "id": 29,
+        "color_name": "White Titanium"
+    },
+    {
+        "id": 30,
+        "color_name": "Blue Titanium"
+    },
+    {
+        "id": 31,
+        "color_name": "Natural Titanium"
+    },
+    {
+        "id": 32,
+        "color_name": "Teal"
+    },
+    {
+        "id": 33,
+        "color_name": "Ultramarine"
+    },
+    {
+        "id": 34,
+        "color_name": "Desert Titanium"
+    }
+]

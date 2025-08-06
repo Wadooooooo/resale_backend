@@ -1,0 +1,14 @@
+[
+    {
+        "id": 1,
+        "name": "Atalant",
+        "type": "Поставщик",
+        "contact_details": null
+    },
+    {
+        "id": 2,
+        "name": "FEDIA",
+        "type": "Поставщик",
+        "contact_details": null
+    }
+]
