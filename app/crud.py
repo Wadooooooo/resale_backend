@@ -2518,10 +2518,23 @@ async def get_financial_snapshots(db: AsyncSession):
 async def create_financial_snapshot(db: AsyncSession):
     """Создает снимок финансового состояния компании, включая детализацию."""
     
-    # 1. Считаем баланс наличных
-    cash_balance = await get_total_balance(db)
+    # 1. Считаем баланс наличных ПО СЧЕТАМ
+    cash_by_account_res = await db.execute(
+        select(
+            models.Accounts.name,
+            func.coalesce(func.sum(models.CashFlow.amount), 0).label("balance")
+        )
+        .join(models.CashFlow, models.Accounts.id == models.CashFlow.account_id, isouter=True)
+        .group_by(models.Accounts.id)
+    )
+    cash_by_account_details = [
+        {"account_name": row.name, "balance": float(row.balance)} 
+        for row in cash_by_account_res.all()
+    ]
+    cash_balance = sum(item['balance'] for item in cash_by_account_details)
 
-    # 2. Считаем стоимость склада и собираем детали
+
+    # 2. Считаем стоимость склада и собираем детали (этот блок без изменений)
     inventory_phones_res = await db.execute(
         select(models.Phones.id, models.Phones.serial_number, models.Phones.purchase_price)
         .where(models.Phones.commercial_status.not_in([
@@ -2534,7 +2547,7 @@ async def create_financial_snapshot(db: AsyncSession):
     inventory_value = sum(p.purchase_price or 0 for p in inventory_phones)
     inventory_details = [{"id": p.id, "sn": p.serial_number, "price": float(p.purchase_price or 0)} for p in inventory_phones]
 
-    # 3. Считаем стоимость товаров в пути и собираем детали
+    # 3. Считаем стоимость товаров в пути и собираем детали (этот блок без изменений)
     goods_in_transit_res = await db.execute(
         select(models.SupplierOrders.id, models.SupplierOrderDetails.price, models.SupplierOrderDetails.quantity)
         .join(models.SupplierOrderDetails)
@@ -2546,7 +2559,6 @@ async def create_financial_snapshot(db: AsyncSession):
     goods_in_transit = goods_in_transit_res.all()
     goods_in_transit_value = sum(g.price * g.quantity for g in goods_in_transit)
     
-    # Группируем детали по ID заказа
     transit_details_grouped = {}
     for g in goods_in_transit:
         if g.id not in transit_details_grouped:
@@ -2554,11 +2566,10 @@ async def create_financial_snapshot(db: AsyncSession):
         transit_details_grouped[g.id] += float(g.price * g.quantity)
     transit_details = [{"order_id": order_id, "value": value} for order_id, value in transit_details_grouped.items()]
 
-
     # 4. Считаем общую стоимость активов
-    total_assets = cash_balance + inventory_value + goods_in_transit_value
+    total_assets = Decimal(cash_balance) + inventory_value + goods_in_transit_value
 
-    # 5. Создаем и сохраняем срез с детализацией
+    # 5. Создаем и сохраняем срез с НОВОЙ детализацией
     new_snapshot = models.FinancialSnapshot(
         snapshot_date=datetime.now(),
         cash_balance=cash_balance,
@@ -2567,7 +2578,8 @@ async def create_financial_snapshot(db: AsyncSession):
         total_assets=total_assets,
         details={
             "inventory": inventory_details,
-            "goods_in_transit": transit_details
+            "goods_in_transit": transit_details,
+            "cash_by_account": cash_by_account_details  # <-- Добавляем новую информацию
         }
     )
     db.add(new_snapshot)

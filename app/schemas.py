@@ -2,7 +2,7 @@
 
 from datetime import date, datetime
 from pydantic import BaseModel, computed_field
-from typing import Optional, List, Union 
+from typing import Optional, List, Dict, Any 
 from .models import TechStatus, CommerceStatus, StatusDelivery, EnumShop, EnumPayment, StatusPay, ProductTypeEnum
 from decimal import Decimal
 
@@ -713,6 +713,7 @@ class FinancialSnapshotSchema(BaseModel):
     inventory_value: Decimal
     goods_in_transit_value: Decimal
     total_assets: Decimal
+    details: Optional[Dict[str, Any]] = None 
 
     class Config:
         from_attributes = True
