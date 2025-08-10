@@ -38,3 +38,5 @@ def downgrade() -> None:
                existing_nullable=False)
     op.create_unique_constraint('financial_snapshots_snapshot_date_key', 'financial_snapshots', ['snapshot_date'])
     # ### end Alembic commands ###
+    
+    

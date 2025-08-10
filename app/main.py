@@ -30,6 +30,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="resale shop API")
 
+origins = [
+    "http://localhost:5173",
+    "http://localhost:5174" # Адрес вашего React-приложения
+    # Можно добавить и другие адреса, если понадобится
+]
+
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -185,11 +191,7 @@ async def read_accessories_for_orders(
     return [schemas.Accessory.model_validate(a) for a in accessories_data]
 
 
-origins = [
-    "http://localhost:5173",
-    "http://localhost:5174" # Адрес вашего React-приложения
-    # Можно добавить и другие адреса, если понадобится
-]
+
 
 app.add_middleware(
     CORSMiddleware,

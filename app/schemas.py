@@ -342,16 +342,29 @@ class SaleDetailCreate(BaseModel):
     unit_price: Decimal
 
 # Схема для создания новой продажи (данные с фронтенда)
+class SalePaymentCreate(BaseModel):
+    account_id: int
+    amount: Decimal
+    payment_method: str
+
+class SalePaymentResponse(BaseModel):
+    id: int
+    account_id: int
+    amount: Decimal
+    payment_method: str
+
+    class Config:
+        from_attributes = True
+
 class SaleCreate(BaseModel):
     customer_id: Optional[int] = None
-    payment_method: str
     notes: Optional[str] = None
     details: List[SaleDetailCreate]
-    account_id: Optional[int] = None
+    payments: List[SalePaymentCreate] 
     discount: Optional[Decimal] = None
-    cash_received: Optional[Decimal] = None
-    change_given: Optional[Decimal] = None
-    is_deferred_payment: bool = False
+    cash_received: Optional[Decimal] = None # Для расчета сдачи
+    change_given: Optional[Decimal] = None  # Для расчета сдачи
+    payment_adjustment: Optional[Decimal] = None
 
 # --- Схемы для ответа от сервера ---
 
@@ -372,7 +385,7 @@ class SaleResponse(BaseModel):
     customer_id: Optional[int] = None
     total_amount: Decimal
     details: List[SaleDetailResponse] = []
-
+    payments: List[SalePaymentResponse] = []
     class Config:
         from_attributes = True
 

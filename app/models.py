@@ -60,6 +60,7 @@ class EnumPayment(PyEnum):
 
 class StatusPay(PyEnum):
     ОЖИДАНИЕ_ОПЛАТЫ = "ОЖИДАНИЕ ОПЛАТЫ"
+    ЧАСТИЧНО_ОПЛАЧЕН = "ЧАСТИЧНО_ОПЛАЧЕН"
     ОПЛАЧЕН = "ОПЛАЧЕН"
     ОТМЕНА = "ОТМЕНА"
 
@@ -451,7 +452,7 @@ class Accounts(Base):
     name: Mapped[Optional[str]] = mapped_column(String(255))
     
     # Relationships
-    sales: Mapped[List["Sales"]] = relationship("Sales", back_populates="account")
+    sale_payments: Mapped[List["SalePayments"]] = relationship("SalePayments", back_populates="account") 
     cash_flows: Mapped[List["CashFlow"]] = relationship("CashFlow", back_populates="account")
 
 
@@ -476,23 +477,38 @@ class Sales(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     sale_date: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP)
     customer_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("customers.id"), nullable=True)
-    payment_method: Mapped[Optional[EnumPayment]] = mapped_column(Enum(EnumPayment, native_enum=False))
     discount: Mapped[Optional[Decimal]] = mapped_column(Numeric, default=0)
-    account_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("accounts.id"))
     payment_status: Mapped[Optional[StatusPay]] = mapped_column(Enum(StatusPay, native_enum=False))
     total_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric)
-    cash_received: Mapped[Optional[Decimal]] = mapped_column(Numeric, nullable=True)
-    change_given: Mapped[Optional[Decimal]] = mapped_column(Numeric, nullable=True)
+    cash_received: Mapped[Optional[Decimal]] = mapped_column(Numeric, nullable=True) # Оставляем для сдачи
+    change_given: Mapped[Optional[Decimal]] = mapped_column(Numeric, nullable=True) # Оставляем для сдачи
     currency_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("currency.id"))
     user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
     notes: Mapped[Optional[str]] = mapped_column(Text)
     
     # Relationships
     customer: Mapped["Customers"] = relationship("Customers", back_populates="sales")
-    account: Mapped[Optional["Accounts"]] = relationship("Accounts", back_populates="sales")
-    currency: Mapped[Optional["Currency"]] = relationship("Currency", back_populates="sales")
     user: Mapped[Optional["Users"]] = relationship("Users", back_populates="sales")
     sale_details: Mapped[List["SaleDetails"]] = relationship("SaleDetails", back_populates="sale")
+    payments: Mapped[List["SalePayments"]] = relationship("SalePayments", back_populates="sale") 
+    currency: Mapped[Optional["Currency"]] = relationship("Currency", back_populates="sales")
+
+
+class SalePayments(Base):
+    __tablename__ = "sale_payments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sale_id: Mapped[int] = mapped_column(Integer, ForeignKey("sales.id"))
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id"))
+    amount: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    payment_method: Mapped[EnumPayment] = mapped_column(Enum(EnumPayment, name="enumpayment", create_type=False))
+    payment_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+    # Relationships
+    sale: Mapped["Sales"] = relationship("Sales", back_populates="payments")
+    account: Mapped["Accounts"] = relationship("Accounts", back_populates="sale_payments") 
+
+
 
 
 class SaleDetails(Base):
