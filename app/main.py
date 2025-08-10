@@ -1500,6 +1500,40 @@ async def create_new_sale(
         details=response_details
     )
 
+@app.get("/api/v1/sales/pending", response_model=List[schemas.SaleResponse], tags=["Sales"],
+         dependencies=[Depends(security.require_permission("perform_sales"))])
+async def get_pending_sales_endpoint(db: AsyncSession = Depends(get_db)):
+    """Получает список продаж, ожидающих оплаты."""
+    sales = await crud.get_pending_sales(db=db)
+    # Используем готовую функцию для форматирования ответа
+    return [await _format_sale_response(sale, db) for sale in sales]
+
+@app.post("/api/v1/sales/{sale_id}/finalize-payment", response_model=schemas.SaleResponse, tags=["Sales"],
+          dependencies=[Depends(security.require_permission("perform_sales"))])
+async def finalize_payment_endpoint(
+    sale_id: int,
+    request: schemas.FinalizePaymentRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Завершает продажу с отложенным платежом."""
+    
+    # 1. crud-функция готовит все изменения, но не коммитит их.
+    #    Сессия остается открытой.
+    sale_to_finalize = await crud.finalize_sale(
+        db, sale_id, request.account_id, current_user.id
+    )
+    
+    # 2. Форматируем ответ, пока сессия открыта.
+    #    На этом шаге SQLAlchemy может безопасно дозагружать любые данные.
+    response = await _format_sale_response(sale_to_finalize, db)
+
+    # 3. И только теперь, когда вся работа сделана, коммитим транзакцию.
+    await db.commit()
+    
+    # 4. Возвращаем готовый ответ.
+    return response
+
 
 @app.post("/api/v1/accessories/{accessory_id}/prices", response_model=schemas.RetailPriceResponse, tags=["Pricing"]
           ,dependencies=[Depends(security.require_permission("manage_pricing"))])

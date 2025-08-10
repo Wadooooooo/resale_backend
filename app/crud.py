@@ -881,69 +881,50 @@ async def get_products_for_sale(db: AsyncSession):
     return final_warehouse_items
 
 async def create_sale(db: AsyncSession, sale_data: schemas.SaleCreate, user_id: int):
-    """Создает новую продажу, обновляет остатки, учитывает сдачу и рассчитывает прибыль."""
+    """Создает новую продажу. Если платёж отложенный, не создает проводку в кассе."""
     
     subtotal = sum(item.unit_price * item.quantity for item in sale_data.details)
     discount_amount = sale_data.discount or Decimal('0')
     total_amount = subtotal - discount_amount
 
-    if not sale_data.account_id:
-        raise HTTPException(status_code=400, detail="Не указан счет для проведения операции.")
+    # Определяем статус платежа
+    payment_status = models.StatusPay.ОЖИДАНИЕ_ОПЛАТЫ if sale_data.is_deferred_payment else models.StatusPay.ОПЛАЧЕН
 
     new_sale = models.Sales(
-        sale_date=datetime.now(),
-        customer_id=sale_data.customer_id,
-        payment_method=models.EnumPayment(sale_data.payment_method),
-        total_amount=total_amount,
-        discount=discount_amount,
-        # VVV СОХРАНЯЕМ НОВЫЕ ДАННЫЕ VVV
-        cash_received=sale_data.cash_received,
-        change_given=sale_data.change_given,
-        payment_status=models.StatusPay.ОПЛАЧЕН,
-        user_id=user_id,
-        notes=sale_data.notes,
-        account_id=sale_data.account_id
+        sale_date=datetime.now(), customer_id=sale_data.customer_id,
+        payment_method=models.EnumPayment(sale_data.payment_method), total_amount=total_amount,
+        discount=discount_amount, cash_received=sale_data.cash_received, change_given=sale_data.change_given,
+        payment_status=payment_status, user_id=user_id, notes=sale_data.notes, account_id=sale_data.account_id
     )
     db.add(new_sale)
     await db.flush()
 
-    # Основная транзакция поступления от продажи
-    amount_for_cash_flow = total_amount
-    description_for_cash_flow = f"Поступление от продажи №{new_sale.id}"
-
-    # Если оплата наличными и клиент не забрал сдачу
-    if sale_data.payment_method == 'НАЛИЧНЫЕ' and sale_data.cash_received and not sale_data.change_given:
-        # Фактическое поступление в кассу - это вся сумма, которую дал клиент
-        amount_for_cash_flow = sale_data.cash_received
-        # Добавляем в описание информацию об оставленной сдаче
-        change_left = sale_data.cash_received - total_amount
-        if change_left > 0:
-            description_for_cash_flow += f". Клиент оставил сдачу: {change_left} руб."
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-    # Основная транзакция поступления от продажи
-    cash_flow_entry = models.CashFlow(
-        date=datetime.now(),
-        operation_categories_id=2, # Поступление от продажи/услуг
-        account_id=sale_data.account_id,
-        amount=amount_for_cash_flow, # Используем новую, фактическую сумму
-        description=description_for_cash_flow, # Используем новое описание
-        currency_id=1
-    )
-    db.add(cash_flow_entry)
-
-    # VVV НОВАЯ ЛОГИКА: Создаем транзакцию для сдачи, если она есть VVV
-    if sale_data.change_given and sale_data.change_given > 0:
-        change_cash_flow_entry = models.CashFlow(
-            date=datetime.now(),
-            operation_categories_id=7, # Предполагаем, что ID 7 = "Прочие расходы" или "Выдача сдачи"
-            account_id=sale_data.account_id, # Сдача выдается с того же счета (кассы)
-            amount=-abs(sale_data.change_given), # Расход
-            description=f"Сдача по продаже №{new_sale.id}",
-            currency_id=1
-        )
-        db.add(change_cash_flow_entry)
+    # Если платёж НЕ отложенный, создаем проводку в кассе
+    if not sale_data.is_deferred_payment:
+        if not sale_data.account_id:
+            raise HTTPException(status_code=400, detail="Не указан счет для проведения операции.")
         
+        # ... (логика для cash_flow и сдачи остается такой же)
+        amount_for_cash_flow = total_amount
+        description_for_cash_flow = f"Поступление от продажи №{new_sale.id}"
+        if sale_data.payment_method == 'НАЛИЧНЫЕ' and sale_data.cash_received and not sale_data.change_given:
+            amount_for_cash_flow = sale_data.cash_received
+            change_left = sale_data.cash_received - total_amount
+            if change_left > 0:
+                description_for_cash_flow += f". Клиент оставил сдачу: {change_left} руб."
+        
+        db.add(models.CashFlow(
+            date=datetime.now(), operation_categories_id=2, account_id=sale_data.account_id,
+            amount=amount_for_cash_flow, description=description_for_cash_flow, currency_id=1
+        ))
+        
+        if sale_data.change_given and sale_data.change_given > 0:
+            db.add(models.CashFlow(
+                date=datetime.now(), operation_categories_id=7, account_id=sale_data.account_id,
+                amount=-abs(sale_data.change_given), description=f"Сдача по продаже №{new_sale.id}", currency_id=1
+            ))
+
+    # Обновляем остатки и статусы телефонов
     for detail in sale_data.details:
         warehouse_item = await db.get(models.Warehouse, detail.warehouse_id)
         if not warehouse_item or warehouse_item.quantity < detail.quantity:
@@ -956,17 +937,22 @@ async def create_sale(db: AsyncSession, sale_data: schemas.SaleCreate, user_id: 
         if warehouse_item.product_type_id == 1: # Телефон
             phone = await db.get(models.Phones, warehouse_item.product_id)
             if phone:
-                phone.commercial_status = models.CommerceStatus.ПРОДАН
-                customer_name = "Розничный покупатель"
+                # В зависимости от типа продажи, ставим разный коммерческий статус
+                phone.commercial_status = models.CommerceStatus.ОТПРАВЛЕН_КЛИЕНТУ if sale_data.is_deferred_payment else models.CommerceStatus.ПРОДАН
+                
+                customer_name = "Розничный покупатель" # ... (логика логов остается)
                 if new_sale.customer_id:
                     customer = await db.get(models.Customers, new_sale.customer_id)
                     if customer: customer_name = customer.name
-                log_entry = models.PhoneMovementLog(
-                    phone_id=phone.id, user_id=user_id,
-                    event_type=models.PhoneEventType.ПРОДАН,
-                    details=f"Продажа №{new_sale.id} клиенту '{customer_name}'. Цена: {detail.unit_price} руб."
-                )
-                db.add(log_entry)
+                
+                log_details = f"Продажа №{new_sale.id} клиенту '{customer_name}'. Цена: {detail.unit_price} руб."
+                if sale_data.is_deferred_payment:
+                    log_details = f"Отправлен клиенту '{customer_name}' по продаже №{new_sale.id} (ожидается оплата). Цена: {detail.unit_price} руб."
+
+                db.add(models.PhoneMovementLog(
+                    phone_id=phone.id, user_id=user_id, event_type=models.PhoneEventType.ПРОДАН, details=log_details
+                ))
+                
                 purchase_price = phone.purchase_price or 0
                 item_profit = (detail.unit_price * detail.quantity) - (purchase_price * detail.quantity) - Decimal(800)
 
@@ -976,11 +962,10 @@ async def create_sale(db: AsyncSession, sale_data: schemas.SaleCreate, user_id: 
                 purchase_price = accessory.purchase_price or 0
                 item_profit = (detail.unit_price * detail.quantity) - (purchase_price * detail.quantity)
 
-        sale_detail_entry = models.SaleDetails(
+        db.add(models.SaleDetails(
             sale_id=new_sale.id, warehouse_id=detail.warehouse_id, quantity=detail.quantity,
             unit_price=detail.unit_price, profit=item_profit
-        )
-        db.add(sale_detail_entry)
+        ))
     
     await db.commit()
     await db.refresh(new_sale, attribute_names=['sale_details'])
@@ -2605,3 +2590,75 @@ async def get_accounts_with_balances(db: AsyncSession):
     result = await db.execute(query)
     return result.mappings().all()
 
+async def get_pending_sales(db: AsyncSession):
+    """Получает все продажи со статусом 'ОЖИДАНИЕ ОПЛАТЫ'."""
+    query = (
+        select(models.Sales)
+        .options(
+            selectinload(models.Sales.customer),
+            selectinload(models.Sales.sale_details).selectinload(models.SaleDetails.warehouse)
+        )
+        .filter(models.Sales.payment_status == models.StatusPay.ОЖИДАНИЕ_ОПЛАТЫ)
+        .order_by(models.Sales.sale_date.desc())
+    )
+    result = await db.execute(query)
+    return result.scalars().all()
+
+async def finalize_sale(db: AsyncSession, sale_id: int, account_id: int, user_id: int):
+    """Завершает продажу: меняет статусы и создает проводку в кассе."""
+    
+    # VVV НАЧАЛО ИЗМЕНЕНИЙ VVV
+    # 1. Загружаем продажу и ВСЕ связанные с ней данные до самого нижнего уровня
+    sale_result = await db.execute(
+        select(models.Sales)
+        .options(
+            selectinload(models.Sales.sale_details)
+            .selectinload(models.SaleDetails.warehouse) # Загружаем складскую запись
+        )
+        .filter(models.Sales.id == sale_id)
+    )
+    sale = sale_result.scalars().one_or_none()
+    # ^^^ КОНЕЦ ИЗМЕНЕНИЙ ^^^
+
+    if not sale or sale.payment_status != models.StatusPay.ОЖИДАНИЕ_ОПЛАТЫ:
+        raise HTTPException(status_code=404, detail="Продажа не найдена или уже оплачена.")
+
+    # 2. Меняем статус продажи
+    sale.payment_status = models.StatusPay.ОПЛАЧЕН
+    sale.account_id = account_id
+
+    # 3. Создаем проводку о ПОСТУПЛЕНИИ денег в кассу
+    db.add(models.CashFlow(
+        date=datetime.now(),
+        operation_categories_id=2, # Поступление от продажи/услуг
+        account_id=account_id,
+        amount=sale.total_amount,
+        description=f"Поступление от продажи №{sale.id}",
+        currency_id=1
+    ))
+
+    # 4. Рассчитываем и списываем комиссию Авито (0.5%)
+    commission_category_result = await db.execute(
+        select(models.OperationCategories).filter(models.OperationCategories.name == "Комиссия Avito")
+    )
+    commission_category = commission_category_result.scalars().first()
+    if not commission_category:
+        raise HTTPException(status_code=400, detail="Категория расходов 'Комиссия Avito' не найдена. Пожалуйста, создайте ее в базе данных.")
+    commission_amount = sale.total_amount * Decimal('0.005')
+    db.add(models.CashFlow(
+        date=datetime.now(),
+        operation_categories_id=commission_category.id,
+        account_id=account_id,
+        amount=-commission_amount,
+        description=f"Комиссия Avito (0.5%) по продаже №{sale.id}",
+        currency_id=1
+    ))
+
+    # 5. Меняем статус телефона на 'ПРОДАН'
+    for detail in sale.sale_details:
+        if detail.warehouse and detail.warehouse.product_type_id == 1:
+            phone = await db.get(models.Phones, detail.warehouse.product_id)
+            if phone:
+                phone.commercial_status = models.CommerceStatus.ПРОДАН
+    
+    return sale

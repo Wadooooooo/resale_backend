@@ -351,6 +351,7 @@ class SaleCreate(BaseModel):
     discount: Optional[Decimal] = None
     cash_received: Optional[Decimal] = None
     change_given: Optional[Decimal] = None
+    is_deferred_payment: bool = False
 
 # --- Схемы для ответа от сервера ---
 
@@ -720,4 +721,7 @@ class FinancialSnapshotSchema(BaseModel):
 
 class AccountWithBalance(Account):
     balance: Decimal
+
+class FinalizePaymentRequest(BaseModel):
+    account_id: int
 
