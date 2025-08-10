@@ -89,7 +89,7 @@ class Color(BaseModel):
 
 class Storage(BaseModel):
     id: int # Оставляем int, так как это ID.
-    storage: Optional[str] = None # <--- ИЗМЕНЕНО: тип изменен на Optional[str] для вывода
+    storage: Optional[int] = None
     class Config:
         from_attributes = True
 
@@ -717,4 +717,7 @@ class FinancialSnapshotSchema(BaseModel):
 
     class Config:
         from_attributes = True
+
+class AccountWithBalance(Account):
+    balance: Decimal
 

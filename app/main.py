@@ -466,6 +466,14 @@ async def read_total_balance(
     total = await crud.get_total_balance(db=db)
     return schemas.TotalBalance(total_balance=total)
 
+@app.get("/api/v1/accounts/balances", 
+         response_model=List[schemas.AccountWithBalance], 
+         tags=["Cash Flow"],
+         dependencies=[Depends(security.require_any_permission("manage_cashflow", "perform_sales"))])
+async def read_accounts_with_balances(db: AsyncSession = Depends(get_db)):
+    """Получает список всех счетов с их текущими балансами."""
+    return await crud.get_accounts_with_balances(db=db)
+
 @app.get("/api/v1/roles", response_model=List[schemas.RoleInfo], tags=["Users"], dependencies=[Depends(security.require_permission("manage_users"))])
 async def read_roles(db: AsyncSession = Depends(get_db)):
     """Получает список всех ролей для формы регистрации."""
@@ -1850,43 +1858,21 @@ async def replace_phone_from_supplier(
 ):
     """Обрабатывает замену бракованного телефона на новый от поставщика."""
     
-    new_phone = await crud.process_supplier_replacement(
+    # 1. crud-функция теперь делает всю работу и возвращает только ID нового телефона
+    new_phone_id = await crud.process_supplier_replacement(
         db=db,
         original_phone_id=phone_id,
         new_phone_data=replacement_data,
         user_id=current_user.id
     )
 
-    # Форматируем ответ, чтобы вернуть полную информацию о НОВОМ телефоне
-    await db.refresh(
-        new_phone, 
-        attribute_names=["model", "model_number"]
-    )
-    
-    model_detail = None
-    if new_phone.model:
-        model_name_base = new_phone.model.model_name.name if new_phone.model.model_name else ""
-        storage_display = models.format_storage_for_display(new_phone.model.storage.storage) if new_phone.model.storage else ""
-        color_name = new_phone.model.color.color_name if new_phone.model.color else ""
-        full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
-        model_detail = schemas.ModelDetail(
-            id=new_phone.model.id,
-            name=full_display_name,
-            base_name=model_name_base,
-            model_name_id=new_phone.model.model_name_id,
-            storage_id=new_phone.model.storage_id,
-            color_id=new_phone.model.color_id
-        )
+    # 2. Теперь, получив ID, мы используем специальную функцию,
+    #    чтобы "чисто" загрузить этот телефон со всеми связями.
+    fresh_new_phone = await crud.get_phone_by_id_fully_loaded(db, new_phone_id)
 
-    return schemas.Phone(
-        id=new_phone.id,
-        serial_number=new_phone.serial_number,
-        technical_status=new_phone.technical_status.value if new_phone.technical_status else None,
-        commercial_status=new_phone.commercial_status.value if new_phone.commercial_status else None,
-        added_date=new_phone.added_date,
-        model=model_detail,
-        model_number=new_phone.model_number
-    )
+    # 3. Форматируем свежие и полные данные в ответ
+    return _format_phone_response(fresh_new_phone)
+
 
 @app.get("/api/v1/models/{model_id}/alternatives", response_model=List[schemas.ModelDetail], tags=["Models"])
 async def read_model_alternatives(model_id: int, db: AsyncSession = Depends(get_db)):

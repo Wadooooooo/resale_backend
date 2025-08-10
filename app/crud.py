@@ -205,8 +205,7 @@ async def create_initial_inspection(db: AsyncSession, phone_id: int, inspection_
 
         # Проверяем, содержит ли название модели что-то из нашего списка
         if any(skip_model in phone_model_name for skip_model in SKIP_BATTERY_TEST_MODELS):
-            # Если да - сразу ставим статус "Упакован"
-            phone.technical_status = models.TechStatus.УПАКОВАН
+            phone.technical_status = models.TechStatus.НА_УПАКОВКЕ
             log_details = (
                 f"Первичная инспекция пройдена. Тест АКБ пропущен для данной модели. S/N присвоен: {inspection_data.serial_number}.\n"
                 f"--- Результаты проверки ---\n{checklist_summary_str}"
@@ -1342,6 +1341,8 @@ async def get_defective_phones(db: AsyncSession):
         )
         .filter(models.Phones.technical_status == models.TechStatus.БРАК)
         .filter(models.Phones.commercial_status != models.CommerceStatus.ОТПРАВЛЕН_ПОСТАВЩИКУ)
+        .filter(models.Phones.commercial_status != models.CommerceStatus.СПИСАН_ПОСТАВЩИКОМ)
+        
     )
     result = await db.execute(query)
     phones = result.scalars().unique().all() # Используем unique() для корректной сборки
@@ -1795,53 +1796,53 @@ async def process_supplier_replacement(
     original_phone_id: int, 
     new_phone_data: schemas.SupplierReplacementCreate, 
     user_id: int
-):
-    """Обрабатывает замену устройства от поставщика."""
+) -> int:  # <-- Указываем, что возвращаем число (ID)
+    """Обрабатывает замену устройства и возвращает ID нового телефона."""
     
-    # 1. Находим старый телефон
     original_phone = await db.get(models.Phones, original_phone_id)
     if not original_phone:
         raise HTTPException(status_code=404, detail="Оригинальный телефон для замены не найден.")
     if original_phone.commercial_status != models.CommerceStatus.ОТПРАВЛЕН_ПОСТАВЩИКУ:
         raise HTTPException(status_code=400, detail="Телефон не был отправлен поставщику.")
 
-    # 2. Меняем статус старого телефона на "Списан"
     original_phone.commercial_status = models.CommerceStatus.СПИСАН_ПОСТАВЩИКОМ
     
-    # 3. Создаем новый телефон
     new_phone = models.Phones(
         serial_number=new_phone_data.new_serial_number,
         model_id=new_phone_data.new_model_id,
-        supplier_order_id=original_phone.supplier_order_id, # Копируем данные от старого
-        purchase_price=original_phone.purchase_price,       # Копируем данные от старого
+        supplier_order_id=original_phone.supplier_order_id,
+        purchase_price=original_phone.purchase_price,
         technical_status=models.TechStatus.ОЖИДАЕТ_ПРОВЕРКУ,
         commercial_status=models.CommerceStatus.НЕ_ГОТОВ_К_ПРОДАЖЕ,
         added_date=datetime.now()
     )
     db.add(new_phone)
-    await db.flush() # Получаем ID для нового телефона
-
-    # 4. Создаем логи для обоих телефонов
+    
     log_original = models.PhoneMovementLog(
         phone_id=original_phone.id,
         user_id=user_id,
-        event_type=models.PhoneEventType.ОБМЕНЕН, # Используем статус "Обменян"
-        details=f"Заменен поставщиком на новый телефон с S/N: {new_phone.serial_number}."
+        event_type=models.PhoneEventType.ОБМЕНЕН,
+        details=f"Заменен поставщиком на новый телефон с S/N: {new_phone_data.new_serial_number}."
     )
+    db.add(log_original)
     
+    await db.flush() # Получаем ID для new_phone
+
     log_new = models.PhoneMovementLog(
         phone_id=new_phone.id,
         user_id=user_id,
         event_type=models.PhoneEventType.ПОСТУПЛЕНИЕ_ОТ_ПОСТАВЩИКА,
         details=f"Поступил от поставщика в качестве замены для старого телефона с S/N: {original_phone.serial_number}."
     )
+    db.add(log_new)
     
-    db.add_all([log_original, log_new])
+    # Сохраняем ID перед коммитом
+    new_phone_id = new_phone.id
     
+    # Коммит теперь находится здесь, завершая операцию в CRUD
     await db.commit()
-    await db.refresh(new_phone)
     
-    return new_phone
+    return new_phone_id # <-- Возвращаем только ID
 
 async def get_replacement_model_options(db: AsyncSession, model_id: int):
     """Находит все модели с тем же названием и памятью, но разными цветами."""
@@ -2589,4 +2590,18 @@ async def create_financial_snapshot(db: AsyncSession):
     return new_snapshot
 
 
+async def get_accounts_with_balances(db: AsyncSession):
+    """Получает список всех счетов с их текущими балансами."""
+    query = (
+        select(
+            models.Accounts.id,
+            models.Accounts.name,
+            func.coalesce(func.sum(models.CashFlow.amount), 0).label("balance")
+        )
+        .outerjoin(models.CashFlow, models.Accounts.id == models.CashFlow.account_id)
+        .group_by(models.Accounts.id, models.Accounts.name)
+        .order_by(models.Accounts.id)
+    )
+    result = await db.execute(query)
+    return result.mappings().all()
 
