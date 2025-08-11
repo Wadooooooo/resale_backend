@@ -477,6 +477,7 @@ class Sales(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     sale_date: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP)
     customer_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("customers.id"), nullable=True)
+    delivery_method: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     discount: Mapped[Optional[Decimal]] = mapped_column(Numeric, default=0)
     payment_status: Mapped[Optional[StatusPay]] = mapped_column(Enum(StatusPay, native_enum=False))
     total_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric)

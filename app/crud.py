@@ -887,20 +887,22 @@ async def create_sale(db: AsyncSession, sale_data: schemas.SaleCreate, user_id: 
 
     total_amount = subtotal - discount_amount + adjustment_amount
 
-    total_paid = sum(p.amount for p in sale_data.payments)
-
-    if abs(total_paid - total_amount) > Decimal('0.01'):
-         raise HTTPException(
-             status_code=400, 
-             # VVV ОБНОВИТЕ СООБЩЕНИЕ ОБ ОШИБКЕ, ЧТОБЫ БЫЛО ИНФОРМАТИВНЕЕ VVV
-             detail=f"Сумма платежей ({total_paid}) не совпадает с итоговой суммой чека ({total_amount})."
-         )
-
-    payment_status = models.StatusPay.ОПЛАЧЕН
+    # Если это продажа с отложенной оплатой
+    if sale_data.delivery_method:
+        payment_status = models.StatusPay.ОЖИДАНИЕ_ОПЛАТЫ
+    else:
+        payment_status = models.StatusPay.ОПЛАЧЕН
+        total_paid = sum(p.amount for p in sale_data.payments)
+        if abs(total_paid - total_amount) > Decimal('0.01'):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Сумма платежей ({total_paid}) не совпадает с итоговой суммой чека ({total_amount})."
+            )
 
     new_sale = models.Sales(
         sale_date=datetime.now(), customer_id=sale_data.customer_id,
-        total_amount=total_amount, # <-- Убедитесь, что сохраняется правильный total_amount
+        total_amount=total_amount,
+        delivery_method=sale_data.delivery_method, # <-- Сохраняем способ доставки
         discount=discount_amount,
         cash_received=sale_data.cash_received, change_given=sale_data.change_given,
         payment_status=payment_status, user_id=user_id, notes=sale_data.notes, currency_id=1
@@ -908,30 +910,30 @@ async def create_sale(db: AsyncSession, sale_data: schemas.SaleCreate, user_id: 
     db.add(new_sale)
     await db.flush()
 
-    # Создаем записи о платежах и проводки в кассе
-    for payment in sale_data.payments:
-        db.add(models.SalePayments(
-            sale_id=new_sale.id,
-            account_id=payment.account_id,
-            amount=payment.amount,
-            payment_method=models.EnumPayment(payment.payment_method)
-        ))
-        db.add(models.CashFlow(
-            date=datetime.now(), operation_categories_id=2, account_id=payment.account_id,
-            amount=payment.amount, description=f"Поступление от продажи №{new_sale.id}", currency_id=1
-        ))
+    # Создаем записи о платежах, только если это НЕ отложенная продажа
+    if not sale_data.delivery_method:
+        # ... (остальная часть функции, отвечающая за обработку платежей, остается БЕЗ ИЗМЕНЕНИЙ) ...
+        for payment in sale_data.payments:
+            db.add(models.SalePayments(
+                sale_id=new_sale.id,
+                account_id=payment.account_id,
+                amount=payment.amount,
+                payment_method=models.EnumPayment(payment.payment_method)
+            ))
+            db.add(models.CashFlow(
+                date=datetime.now(), operation_categories_id=2, account_id=payment.account_id,
+                amount=payment.amount, description=f"Поступление от продажи №{new_sale.id}", currency_id=1
+            ))
 
-    # Логика сдачи (если есть)
-    if sale_data.change_given and sale_data.change_given > 0:
-        # Ищем кассу, чтобы списать сдачу
-        cash_payment = next((p for p in sale_data.payments if p.payment_method == 'НАЛИЧНЫЕ'), None)
-        if not cash_payment:
-             raise HTTPException(status_code=400, detail="Сдача указана, но нет оплаты наличными.")
-        
-        db.add(models.CashFlow(
-            date=datetime.now(), operation_categories_id=7, account_id=cash_payment.account_id,
-            amount=-abs(sale_data.change_given), description=f"Сдача по продаже №{new_sale.id}", currency_id=1
-        ))
+        if sale_data.change_given and sale_data.change_given > 0:
+            cash_payment = next((p for p in sale_data.payments if p.payment_method == 'НАЛИЧНЫЕ'), None)
+            if not cash_payment:
+                 raise HTTPException(status_code=400, detail="Сдача указана, но нет оплаты наличными.")
+            
+            db.add(models.CashFlow(
+                date=datetime.now(), operation_categories_id=7, account_id=cash_payment.account_id,
+                amount=-abs(sale_data.change_given), description=f"Сдача по продаже №{new_sale.id}", currency_id=1
+            ))
 
     # Обновляем остатки и статусы телефонов
     # ... (эта часть кода остается такой же, как была у вас)
@@ -952,6 +954,9 @@ async def create_sale(db: AsyncSession, sale_data: schemas.SaleCreate, user_id: 
                 if new_sale.customer_id:
                     customer = await db.get(models.Customers, new_sale.customer_id)
                     if customer: customer_name = customer.name
+                log_details = f"Продажа №{new_sale.id} клиенту '{customer_name}'. Цена: {detail.unit_price} руб."
+                if sale_data.delivery_method:
+                    log_details += f" (Доставка: {sale_data.delivery_method})"
                 log_entry = models.PhoneMovementLog(
                     phone_id=phone.id, user_id=user_id,
                     event_type=models.PhoneEventType.ПРОДАН,
@@ -2627,8 +2632,6 @@ async def get_pending_sales(db: AsyncSession):
 async def finalize_sale(db: AsyncSession, sale_id: int, account_id: int, user_id: int):
     """Завершает продажу: меняет статусы и создает проводку в кассе."""
     
-    # VVV НАЧАЛО ИЗМЕНЕНИЙ VVV
-    # 1. Загружаем продажу и ВСЕ связанные с ней данные до самого нижнего уровня
     sale_result = await db.execute(
         select(models.Sales)
         .options(
@@ -2638,16 +2641,13 @@ async def finalize_sale(db: AsyncSession, sale_id: int, account_id: int, user_id
         .filter(models.Sales.id == sale_id)
     )
     sale = sale_result.scalars().one_or_none()
-    # ^^^ КОНЕЦ ИЗМЕНЕНИЙ ^^^
 
     if not sale or sale.payment_status != models.StatusPay.ОЖИДАНИЕ_ОПЛАТЫ:
         raise HTTPException(status_code=404, detail="Продажа не найдена или уже оплачена.")
 
-    # 2. Меняем статус продажи
     sale.payment_status = models.StatusPay.ОПЛАЧЕН
-    sale.account_id = account_id
 
-    # 3. Создаем проводку о ПОСТУПЛЕНИИ денег в кассу
+
     db.add(models.CashFlow(
         date=datetime.now(),
         operation_categories_id=2, # Поступление от продажи/услуг
@@ -2657,28 +2657,30 @@ async def finalize_sale(db: AsyncSession, sale_id: int, account_id: int, user_id
         currency_id=1
     ))
 
-    # 4. Рассчитываем и списываем комиссию Авито (0.5%)
-    commission_category_result = await db.execute(
-        select(models.OperationCategories).filter(models.OperationCategories.name == "Комиссия Avito")
-    )
-    commission_category = commission_category_result.scalars().first()
-    if not commission_category:
-        raise HTTPException(status_code=400, detail="Категория расходов 'Комиссия Avito' не найдена. Пожалуйста, создайте ее в базе данных.")
-    commission_amount = sale.total_amount * Decimal('0.005')
-    db.add(models.CashFlow(
-        date=datetime.now(),
-        operation_categories_id=commission_category.id,
-        account_id=account_id,
-        amount=-commission_amount,
-        description=f"Комиссия Avito (0.5%) по продаже №{sale.id}",
-        currency_id=1
-    ))
+    # Рассчитываем комиссию, только если способ доставки - "Авито Доставка"
+    if sale.delivery_method == "Авито Доставка":
+        commission_category_result = await db.execute(
+            select(models.OperationCategories).filter(models.OperationCategories.name == "Комиссия Avito")
+        )
+        commission_category = commission_category_result.scalars().first()
+        if not commission_category:
+            # Откатываем транзакцию, чтобы не провести только часть операции
+            await db.rollback()
+            raise HTTPException(status_code=400, detail="Категория расходов 'Комиссия Avito' не найдена.")
+        
+        commission_amount = sale.total_amount * Decimal('0.005')
+        db.add(models.CashFlow(
+            date=datetime.now(),
+            operation_categories_id=commission_category.id,
+            account_id=account_id,
+            amount=-commission_amount,
+            description=f"Комиссия Avito (0.5%) по продаже №{sale.id}",
+            currency_id=1
+        ))
 
-    # 5. Меняем статус телефона на 'ПРОДАН'
     for detail in sale.sale_details:
         if detail.warehouse and detail.warehouse.product_type_id == 1:
             phone = await db.get(models.Phones, detail.warehouse.product_id)
             if phone:
                 phone.commercial_status = models.CommerceStatus.ПРОДАН
-    
     return sale

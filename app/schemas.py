@@ -360,7 +360,8 @@ class SaleCreate(BaseModel):
     customer_id: Optional[int] = None
     notes: Optional[str] = None
     details: List[SaleDetailCreate]
-    payments: List[SalePaymentCreate] 
+    payments: List[SalePaymentCreate] = []
+    delivery_method: Optional[str] = None
     discount: Optional[Decimal] = None
     cash_received: Optional[Decimal] = None # Для расчета сдачи
     change_given: Optional[Decimal] = None  # Для расчета сдачи
@@ -384,6 +385,7 @@ class SaleResponse(BaseModel):
     sale_date: datetime
     customer_id: Optional[int] = None
     total_amount: Decimal
+    delivery_method: Optional[str] = None
     details: List[SaleDetailResponse] = []
     payments: List[SalePaymentResponse] = []
     class Config:
