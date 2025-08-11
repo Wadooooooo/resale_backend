@@ -31,9 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI(title="resale shop API")
 
 origins = [
-    "http://localhost:5173",
-    "http://localhost:5174" # Адрес вашего React-приложения
-    # Можно добавить и другие адреса, если понадобится
+    "http://192.168.1.80"
 ]
 
 

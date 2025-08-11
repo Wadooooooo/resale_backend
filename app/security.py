@@ -19,7 +19,7 @@ from .database import get_db
 
 # Генерируйте этот ключ командой: openssl rand -hex 32
 # И храните его в секрете (лучше в переменных окружения)
-SECRET_KEY = "DKL11kdskl142324mmkfd2ndiu2hufniufnuiHUHIUE7y7"
+SECRET_KEY = os.getenv("SECRET_KEY", "DKL11kdskl142324mmkfd2ndiu2hufniufnuiHUHIUE7y7")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
