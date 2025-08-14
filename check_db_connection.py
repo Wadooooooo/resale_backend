@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 # --- ВАЖНО: Вставьте сюда ваши данные ---
 # Если база данных на компьютере друга, замените 127.0.0.1 на его IP-адрес.
 # Также замените user и password на настоящие.
-DATABASE_URL = "postgresql+asyncpg://user:password@127.0.0.1:5432/resale_v051"
+DATABASE_URL = "postgresql+asyncpg://user:password@127.0.0.1:5432/resale100825"
 
 async def check_connection():
     """

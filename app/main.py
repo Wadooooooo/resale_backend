@@ -1499,6 +1499,7 @@ async def create_new_sale(
         sale_date=fresh_sale.sale_date,
         customer_id=fresh_sale.customer_id,
         total_amount=fresh_sale.total_amount,
+        discount=fresh_sale.discount,
         details=response_details
     )
 

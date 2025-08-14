@@ -366,6 +366,7 @@ class SaleCreate(BaseModel):
     cash_received: Optional[Decimal] = None # Для расчета сдачи
     change_given: Optional[Decimal] = None  # Для расчета сдачи
     payment_adjustment: Optional[Decimal] = None
+    kept_change: Optional[Decimal] = None
 
 # --- Схемы для ответа от сервера ---
 
@@ -386,6 +387,7 @@ class SaleResponse(BaseModel):
     customer_id: Optional[int] = None
     total_amount: Decimal
     delivery_method: Optional[str] = None
+    discount: Optional[Decimal] = None
     details: List[SaleDetailResponse] = []
     payments: List[SalePaymentResponse] = []
     class Config:

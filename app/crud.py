@@ -925,15 +925,31 @@ async def create_sale(db: AsyncSession, sale_data: schemas.SaleCreate, user_id: 
                 amount=payment.amount, description=f"Поступление от продажи №{new_sale.id}", currency_id=1
             ))
 
-        if sale_data.change_given and sale_data.change_given > 0:
+        if sale_data.cash_received and sale_data.cash_received > 0:
             cash_payment = next((p for p in sale_data.payments if p.payment_method == 'НАЛИЧНЫЕ'), None)
             if not cash_payment:
-                 raise HTTPException(status_code=400, detail="Сдача указана, но нет оплаты наличными.")
-            
-            db.add(models.CashFlow(
-                date=datetime.now(), operation_categories_id=7, account_id=cash_payment.account_id,
-                amount=-abs(sale_data.change_given), description=f"Сдача по продаже №{new_sale.id}", currency_id=1
-            ))
+                raise HTTPException(status_code=400, detail="Сдача или полученные наличные указаны, но нет оплаты наличными.")
+
+            # СЦЕНАРИЙ 1: Клиент оставил сдачу
+            if sale_data.kept_change and sale_data.kept_change > 0:
+                # Находим категорию "Невостребованная сдача"
+                kept_change_category_res = await db.execute(
+                    select(models.OperationCategories).filter(models.OperationCategories.name == "Невостребованная сдача")
+                )
+                kept_change_category = kept_change_category_res.scalars().first()
+                if not kept_change_category:
+                    # Если категория не найдена, это критическая ошибка конфигурации
+                    raise HTTPException(status_code=500, detail="Категория операции 'Невостребованная сдача' не найдена. Добавьте ее в БД.")
+
+                # Создаем запись о ДОХОДЕ
+                db.add(models.CashFlow(
+                    date=datetime.now(),
+                    operation_categories_id=kept_change_category.id,
+                    account_id=cash_payment.account_id,
+                    amount=abs(sale_data.kept_change), # Сумма положительная (доход)
+                    description=f"Оставленная сдача по продаже №{new_sale.id}",
+                    currency_id=1
+                ))
 
     # Обновляем остатки и статусы телефонов
     # ... (эта часть кода остается такой же, как была у вас)
