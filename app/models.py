@@ -885,3 +885,28 @@ class FinancialSnapshot(Base):
     total_assets: Mapped[Decimal] = mapped_column(Numeric, default=0)
     
     details: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True) # Для хранения деталей расчета
+
+class Deposits(Base):
+    __tablename__ = "deposits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lender_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    principal_amount: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    annual_interest_rate: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    payments: Mapped[List["DepositPayments"]] = relationship("DepositPayments", back_populates="deposit")
+    
+class DepositPayments(Base):
+    __tablename__ = "deposit_payments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    deposit_id: Mapped[int] = mapped_column(Integer, ForeignKey("deposits.id"))
+    payment_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    amount: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id"))
+
+    deposit: Mapped["Deposits"] = relationship("Deposits")
+    account: Mapped["Accounts"] = relationship("Accounts")
+    

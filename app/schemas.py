@@ -742,3 +742,38 @@ class AccountWithBalance(Account):
 class FinalizePaymentRequest(BaseModel):
     account_id: int
 
+class DepositBase(BaseModel):
+    lender_name: str
+    principal_amount: Decimal
+    annual_interest_rate: Decimal
+    start_date: date
+
+class DepositCreate(DepositBase):
+    pass
+
+class Deposit(DepositBase):
+    id: int
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+class DepositPaymentCreate(BaseModel):
+    deposit_id: int
+    amount: Decimal
+    account_id: int
+
+class DepositPayment(DepositPaymentCreate):
+    id: int
+    payment_date: datetime
+
+    class Config:
+        from_attributes = True
+# Схема для ответа с расчетами
+class DepositDetails(Deposit):
+    monthly_interest: Decimal
+    months_passed: int
+    total_interest: Decimal
+    total_debt: Decimal
+    total_paid: Decimal     
+    remaining_debt: Decimal 

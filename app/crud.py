@@ -2700,3 +2700,78 @@ async def finalize_sale(db: AsyncSession, sale_id: int, account_id: int, user_id
             if phone:
                 phone.commercial_status = models.CommerceStatus.ПРОДАН
     return sale
+
+async def create_deposit(db: AsyncSession, deposit_data: schemas.DepositCreate) -> models.Deposits:
+    """Создает новую запись о вкладе."""
+    new_deposit = models.Deposits(**deposit_data.model_dump())
+    db.add(new_deposit)
+    await db.commit()
+    await db.refresh(new_deposit)
+    return new_deposit
+
+async def get_all_deposits_details(db: AsyncSession, target_date: date) -> List[schemas.DepositDetails]:
+    """Получает все активные вклады и рассчитывает по ним долг на указанную дату."""
+    
+    result = await db.execute(
+        select(models.Deposits).options(
+            selectinload(models.Deposits.payments) # <-- Загружаем связанные платежи
+        ).filter(models.Deposits.is_active == True)
+    )
+    active_deposits = result.scalars().unique().all()
+
+    details_list = []
+    for deposit in active_deposits:
+        monthly_interest = (deposit.principal_amount * deposit.annual_interest_rate / 100) / 12
+        months_passed = (target_date.year - deposit.start_date.year) * 12 + (target_date.month - deposit.start_date.month)
+        if months_passed < 0:
+            months_passed = 0
+
+        total_interest = monthly_interest * months_passed
+        total_debt = deposit.principal_amount + total_interest
+
+        # --- НОВАЯ ЛОГИКА ---
+        total_paid = sum(payment.amount for payment in deposit.payments)
+        remaining_debt = total_debt - total_paid
+        # --- КОНЕЦ НОВОЙ ЛОГИКИ ---
+
+        details_list.append(schemas.DepositDetails(
+            id=deposit.id,
+            lender_name=deposit.lender_name,
+            principal_amount=deposit.principal_amount,
+            annual_interest_rate=deposit.annual_interest_rate,
+            start_date=deposit.start_date,
+            is_active=deposit.is_active,
+            monthly_interest=monthly_interest,
+            months_passed=months_passed,
+            total_interest=total_interest,
+            total_debt=total_debt,
+            total_paid=total_paid,          
+            remaining_debt=remaining_debt   
+        ))
+        
+    return details_list
+
+async def create_deposit_payment(db: AsyncSession, payment_data: schemas.DepositPaymentCreate):
+    """Создает платеж по вкладу и соответствующий расход в кассе."""
+    deposit = await db.get(models.Deposits, payment_data.deposit_id)
+    if not deposit:
+        raise HTTPException(status_code=404, detail="Вклад не найден")
+
+    # 1. Создаем запись о самом платеже
+    new_payment = models.DepositPayments(**payment_data.model_dump())
+    db.add(new_payment)
+
+    # 2. Создаем запись о расходе в движении денег
+    cash_flow = models.CashFlow(
+        date=datetime.now(),
+        operation_categories_id=33, 
+        account_id=payment_data.account_id,
+        amount=-abs(payment_data.amount), # Расход всегда отрицательный
+        description=f"Выплата по вкладу (ID: {deposit.id}) вкладчику {deposit.lender_name}",
+        currency_id=1
+    )
+    db.add(cash_flow)
+    
+    await db.commit()
+    await db.refresh(new_payment)
+    return new_payment

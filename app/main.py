@@ -468,6 +468,38 @@ async def read_total_balance(
     total = await crud.get_total_balance(db=db)
     return schemas.TotalBalance(total_balance=total)
 
+# --- Эндпоинты для Вкладов ---
+
+@app.post("/api/v1/deposits", response_model=schemas.Deposit, tags=["Deposits"],
+          dependencies=[Depends(security.require_permission("manage_cashflow"))])
+async def add_new_deposit(
+    deposit_data: schemas.DepositCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    """Добавляет новый вклад (обязательство)."""
+    return await crud.create_deposit(db=db, deposit_data=deposit_data)
+
+@app.get("/api/v1/deposits/details", response_model=List[schemas.DepositDetails], tags=["Deposits"],
+         dependencies=[Depends(security.require_permission("manage_cashflow"))])
+async def read_deposits_details(
+    target_date: Optional[date] = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """Получает детали по всем вкладам на указанную дату (или на сегодня)."""
+    if target_date is None:
+        target_date = date.today()
+    return await crud.get_all_deposits_details(db=db, target_date=target_date)
+
+@app.post("/api/v1/deposits/pay", response_model=schemas.DepositPayment, tags=["Deposits"],
+          dependencies=[Depends(security.require_permission("manage_cashflow"))])
+async def pay_for_deposit(
+    payment_data: schemas.DepositPaymentCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    """Проводит оплату по вкладу."""
+    return await crud.create_deposit_payment(db=db, payment_data=payment_data)
+
+
 @app.get("/api/v1/accounts/balances", 
          response_model=List[schemas.AccountWithBalance], 
          tags=["Cash Flow"],
