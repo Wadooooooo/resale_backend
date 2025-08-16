@@ -4,7 +4,7 @@ from . import security
 
 from fastapi.exceptions import RequestValidationError
 from sqlalchemy import text
-from datetime import timedelta, date, datetime
+from datetime import timedelta, date, datetime, time
 from typing import List, Optional
 from pydantic import BaseModel
 from decimal import Decimal
@@ -14,7 +14,9 @@ from fastapi import Depends, FastAPI, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
-from sqlalchemy import select
+from sqlalchemy import select, update 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from .database import AsyncSessionLocal
 from .models import format_enum_value_for_display
 
 # Удалить этот импорт, так как используется AsyncSession
@@ -35,6 +37,33 @@ origins = [
     "http://localhost:5174" # Адрес вашего React-приложения
     # Можно добавить и другие адреса, если понадобится
 ]
+
+async def close_overdue_shifts():
+    """Находит все незавершенные смены и закрывает их в 23:59."""
+    print("Планировщик: Запущена проверка незакрытых смен...")
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            # Находим все смены, где shift_end еще не установлен
+            stmt = select(models.EmployeeShifts).where(models.EmployeeShifts.shift_end == None)
+            result = await session.execute(stmt)
+            open_shifts = result.scalars().all()
+
+            shifts_to_close = []
+            for shift in open_shifts:
+                # Определяем конец дня для каждой смены
+                end_of_day = datetime.combine(shift.shift_start.date(), time(23, 59, 59))
+                
+                # Если текущее время уже прошло конец дня начала смены, закрываем ее
+                if datetime.now() > end_of_day:
+                    shift.shift_end = end_of_day
+                    shifts_to_close.append(shift)
+                    print(f"Планировщик: Смена ID {shift.id} будет закрыта временем {end_of_day}")
+
+            if shifts_to_close:
+                await session.commit()
+                print(f"Планировщик: Успешно закрыто {len(shifts_to_close)} смен.")
+            else:
+                print("Планировщик: Незакрытых смен для завершения не найдено.")
 
 
 @app.exception_handler(RequestValidationError)
@@ -2318,4 +2347,22 @@ async def read_financial_snapshots(db: AsyncSession = Depends(get_db)):
 async def create_new_financial_snapshot(db: AsyncSession = Depends(get_db)):
     """Создает новый финансовый срез на текущую дату."""
     return await crud.create_financial_snapshot(db=db)
+
+# Создаем экземпляр планировщика
+scheduler = AsyncIOScheduler(timezone="Asia/Yekaterinburg") # Укажите ваш часовой пояс
+
+# Добавляем нашу задачу в планировщик
+scheduler.add_job(close_overdue_shifts, 'cron', hour=23, minute=59)
+
+@app.on_event("startup")
+async def startup_event():
+    """Запускает планировщик при старте приложения."""
+    scheduler.start()
+    print("Планировщик задач запущен.")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Останавливает планировщик при выключении приложения."""
+    scheduler.shutdown()
+    print("Планировщик задач остановлен.")
 
