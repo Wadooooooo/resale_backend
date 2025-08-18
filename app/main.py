@@ -8,6 +8,7 @@ from datetime import timedelta, date, datetime, time
 from typing import List, Optional
 from pydantic import BaseModel
 from decimal import Decimal
+import secrets
 
 from fastapi.responses import JSONResponse
 from fastapi import Depends, FastAPI, HTTPException, status, Request
@@ -18,6 +19,8 @@ from sqlalchemy import select, update
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from .database import AsyncSessionLocal
 from .models import format_enum_value_for_display
+from aiogram import types
+from .bot import bot, dp, TELEGRAM_BOT_TOKEN
 
 # Удалить этот импорт, так как используется AsyncSession
 # from sqlalchemy.orm import Session 
@@ -639,6 +642,18 @@ async def read_users_me(current_user: models.Users = Depends(security.get_curren
         permissions_list = [rp.permission for rp in current_user.role.role_permissions if rp.permission]
         user_data["role"] = {"role_name": current_user.role.role_name, "permissions": permissions_list}
     return user_data
+
+@app.get("/api/v1/users/me/telegram-link-token", response_model=schemas.Token, tags=["Users"])
+async def get_telegram_link_token(
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Генерирует одноразовый токен для привязки Telegram аккаунта."""
+    token = secrets.token_hex(16)
+    # В реальном приложении токен нужно сохранять в базу или кэш с временем жизни
+    # Для простоты, мы будем использовать ID пользователя
+    link_code = f"{current_user.id}-{token}"
+    return {"access_token": link_code, "token_type": "link"}
 
 
 @app.get("/api/v1/all_models_full_info", response_model=List[schemas.ModelDetail], tags=["Models"])
@@ -2348,6 +2363,18 @@ async def create_new_financial_snapshot(db: AsyncSession = Depends(get_db)):
     """Создает новый финансовый срез на текущую дату."""
     return await crud.create_financial_snapshot(db=db)
 
+WEBHOOK_URL = f"https://604aa28a8f19.ngrok-free.app/api/v1/telegram/webhook/{TELEGRAM_BOT_TOKEN}"
+
+@app.post("/api/v1/telegram/webhook/{token}")
+async def telegram_webhook(token: str, update: dict):
+    """Принимает обновления от Telegram."""
+    if token != TELEGRAM_BOT_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid token")
+
+    telegram_update = types.Update(**update)
+    await dp.feed_update(bot=bot, update=telegram_update)
+    return {"ok": True}
+
 # Создаем экземпляр планировщика
 scheduler = AsyncIOScheduler(timezone="Asia/Yekaterinburg") # Укажите ваш часовой пояс
 
@@ -2356,13 +2383,26 @@ scheduler.add_job(close_overdue_shifts, 'cron', hour=23, minute=59)
 
 @app.on_event("startup")
 async def startup_event():
-    """Запускает планировщик при старте приложения."""
+    """Запускает планировщик и устанавливает вебхук при старте приложения."""
+    # Устанавливаем вебхук
+    webhook_info = await bot.get_webhook_info()
+    if webhook_info.url != WEBHOOK_URL:
+        await bot.set_webhook(url=WEBHOOK_URL)
+        print(">>> Вебхук для Telegram бота УСТАНОВЛЕН.")
+    else:
+        # ДОБАВЛЕН ЭТОТ БЛОК ДЛЯ ИНФОРМАТИВНОСТИ
+        print(">>> Вебхук для Telegram бота УЖЕ БЫЛ УСТАНОВЛЕН.")
+    
     scheduler.start()
     print("Планировщик задач запущен.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Останавливает планировщик при выключении приложения."""
+    """Останавливает планировщик и удаляет вебхук при выключении приложения."""
+    await bot.delete_webhook()
+    print("Вебхук для Telegram бота удален.")
+
     scheduler.shutdown()
     print("Планировщик задач остановлен.")
+
 

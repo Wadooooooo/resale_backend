@@ -621,8 +621,9 @@ async def get_supplier_orders(db: AsyncSession, skip: int = 0, limit: int = 1000
                 selectinload(models.Models.color)
             ),
             joinedload(models.SupplierOrderDetails.accessory)
-        )
-    ).order_by(models.SupplierOrders.id.desc()) # Сортируем, чтобы новые были сверху
+        ),
+        selectinload(models.SupplierOrders.supplier) # Также загрузим поставщика
+    ).order_by(models.SupplierOrders.id.desc())
 
     # Если нужно применить лимит для роли (например, для техника)
     if apply_role_limit:

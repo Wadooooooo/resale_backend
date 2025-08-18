@@ -6,7 +6,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 from sqlalchemy import (
     Boolean, Date, DateTime, ForeignKey, Integer, 
-    Interval, Numeric, String, Text, TIMESTAMP, Enum
+    Interval, Numeric, String, Text, TIMESTAMP, Enum, BigInteger
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -225,6 +225,7 @@ class Users(Base):
     active: Mapped[Optional[bool]] = mapped_column(Boolean)
     name: Mapped[Optional[str]] = mapped_column(String(255))
     last_name: Mapped[Optional[str]] = mapped_column(String(255))
+    telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, unique=True, nullable=True, index=True)
     
     # Relationships
     role: Mapped[Optional["Roles"]] = relationship("Roles", back_populates="users")
