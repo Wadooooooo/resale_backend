@@ -1,7 +1,7 @@
 # app/schemas.py
 
 from datetime import date, datetime
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, computed_field, ConfigDict
 from typing import Optional, List, Dict, Any 
 from .models import TechStatus, CommerceStatus, StatusDelivery, EnumShop, EnumPayment, StatusPay, ProductTypeEnum
 from decimal import Decimal
@@ -34,6 +34,8 @@ from decimal import Decimal
 #     else:
 #         return f"{numeric_value}GB"
     
+class CustomBaseModel(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
 
 # --- Схемы для токена ---
 class Token(BaseModel):
@@ -465,6 +467,10 @@ class CashFlowCreate(CashFlowBase):
 class CashFlow(CashFlowBase):
     id: int
     date: datetime
+    operation_category: Optional[OperationCategory] = None
+    account: Optional[Account] = None
+    counterparty: Optional[Counterparty] = None
+    
     class Config:
         from_attributes = True
 
@@ -777,3 +783,27 @@ class DepositDetails(Deposit):
     total_debt: Decimal
     total_paid: Decimal     
     remaining_debt: Decimal 
+
+class ProductAnalyticsItem(CustomBaseModel):
+    model_name: str
+    units_sold: int
+    total_revenue: Decimal
+    total_profit: Decimal
+
+
+class TimeSeriesDataPoint(CustomBaseModel):
+    date: date
+    value: Decimal
+
+class ExpenseByCategory(CustomBaseModel):
+    category: str
+    total: Decimal
+
+class FinancialAnalyticsResponse(CustomBaseModel):
+    revenue_series: List[TimeSeriesDataPoint]
+    expense_series: List[TimeSeriesDataPoint]
+    profit_series: List[TimeSeriesDataPoint]
+    expense_breakdown: List[ExpenseByCategory]
+
+
+

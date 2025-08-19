@@ -2776,3 +2776,177 @@ async def create_deposit_payment(db: AsyncSession, payment_data: schemas.Deposit
     await db.commit()
     await db.refresh(new_payment)
     return new_payment
+
+async def get_product_analytics(db: AsyncSession, start_date: date, end_date: date) -> List[dict]:
+    """Собирает аналитику по проданным моделям телефонов за период."""
+    end_date_inclusive = end_date + timedelta(days=1)
+
+    query = (
+        select(
+            models.ModelName.name,
+            func.sum(models.SaleDetails.quantity).label("units_sold"),
+            func.sum(models.SaleDetails.unit_price * models.SaleDetails.quantity).label("total_revenue"),
+            func.sum(models.SaleDetails.profit).label("total_profit")
+        )
+        .join(models.Sales, models.SaleDetails.sale_id == models.Sales.id)
+        .join(models.Warehouse, models.SaleDetails.warehouse_id == models.Warehouse.id)
+        .join(models.Phones, models.Warehouse.product_id == models.Phones.id)
+        .join(models.Models, models.Phones.model_id == models.Models.id)
+        .join(models.ModelName, models.Models.model_name_id == models.ModelName.id)
+        .where(
+            models.Warehouse.product_type_id == 1,
+            models.Sales.sale_date >= start_date,
+            models.Sales.sale_date < end_date_inclusive
+        )
+        .group_by(models.ModelName.name)
+        .order_by(func.sum(models.SaleDetails.quantity).desc())
+    )
+
+    result = await db.execute(query)
+    return [
+        {
+            "model_name": row.name,
+            "units_sold": row.units_sold or 0,
+            "total_revenue": row.total_revenue or Decimal('0'),
+            "total_profit": row.total_profit or Decimal('0')
+        }
+        for row in result.all()
+    ]
+
+async def get_financial_analytics(db: AsyncSession, start_date: date, end_date: date):
+    end_date_inclusive = end_date + timedelta(days=1)
+
+    # 1. Выручка по дням
+    revenue_q = (
+        select(
+            func.date(models.Sales.sale_date).label("day"),
+            func.sum(models.Sales.total_amount).label("total")
+        )
+        .filter(models.Sales.sale_date >= start_date, models.Sales.sale_date < end_date_inclusive)
+        .group_by(func.date(models.Sales.sale_date))
+    )
+    revenue_res = await db.execute(revenue_q)
+    revenue_series = [{"date": r.day, "value": r.total} for r in revenue_res]
+
+    # 2. Прибыль по дням
+    profit_q = (
+        select(
+            func.date(models.Sales.sale_date).label("day"),
+            func.sum(models.SaleDetails.profit).label("total")
+        )
+        .join(models.Sales)
+        .filter(models.Sales.sale_date >= start_date, models.Sales.sale_date < end_date_inclusive)
+        .group_by(func.date(models.Sales.sale_date))
+    )
+    profit_res = await db.execute(profit_q)
+    profit_series = [{"date": r.day, "value": r.total} for r in profit_res]
+
+    # 3. Расходы по дням
+    expense_q = (
+        select(
+            func.date(models.CashFlow.date).label("day"),
+            func.sum(models.CashFlow.amount).label("total")
+        )
+        .join(models.OperationCategories)
+        .filter(
+            models.CashFlow.date >= start_date, 
+            models.CashFlow.date < end_date_inclusive,
+            models.OperationCategories.type == 'expense'
+        )
+        .group_by(func.date(models.CashFlow.date))
+    )
+    expense_res = await db.execute(expense_q)
+    expense_series = [{"date": r.day, "value": abs(r.total)} for r in expense_res] # Берем модуль, т.к. расходы отрицательные
+
+    # 4. Разбивка расходов по категориям
+    expense_breakdown_q = (
+        select(
+            models.OperationCategories.name.label("category"),
+            func.sum(models.CashFlow.amount).label("total")
+        )
+        .join(models.OperationCategories)
+        .filter(
+            models.CashFlow.date >= start_date, 
+            models.CashFlow.date < end_date_inclusive,
+            models.OperationCategories.type == 'expense'
+        )
+        .group_by(models.OperationCategories.name)
+    )
+    expense_breakdown_res = await db.execute(expense_breakdown_q)
+    expense_breakdown = [{"category": r.category, "total": abs(r.total)} for r in expense_breakdown_res]
+
+    return {
+        "revenue_series": revenue_series,
+        "expense_series": expense_series,
+        "profit_series": profit_series,
+        "expense_breakdown": expense_breakdown
+    }
+
+async def get_sales_by_date(db: AsyncSession, target_date: date) -> List[models.Sales]:
+    """Получает все продажи за конкретный день со всеми связанными данными."""
+    start_of_day = datetime.combine(target_date, time.min)
+    end_of_day = datetime.combine(target_date, time.max)
+    
+    query = (
+        select(models.Sales)
+        .options(
+            selectinload(models.Sales.sale_details)
+            .selectinload(models.SaleDetails.warehouse),
+            selectinload(models.Sales.customer)
+        )
+        .filter(models.Sales.sale_date.between(start_of_day, end_of_day))
+        .order_by(models.Sales.sale_date.desc())
+    )
+    result = await db.execute(query)
+    return result.scalars().all()
+
+async def get_cashflow_by_date(db: AsyncSession, target_date: date) -> List[models.CashFlow]:
+    """Получает все движения денежных средств за конкретный день."""
+    start_of_day = datetime.combine(target_date, time.min)
+    end_of_day = datetime.combine(target_date, time.max)
+    
+    query = (
+        select(models.CashFlow)
+        .options(
+            selectinload(models.CashFlow.operation_category),
+            selectinload(models.CashFlow.account),
+            selectinload(models.CashFlow.counterparty)
+        )
+        .filter(models.CashFlow.date.between(start_of_day, end_of_day))
+        .order_by(models.CashFlow.date.desc())
+    )
+    result = await db.execute(query)
+    return result.scalars().all()
+
+async def get_sales_for_product_analytics_details(db: AsyncSession, model_name: str, start_date: date, end_date: date) -> List[models.Sales]:
+    """Находит все продажи, содержащие указанную модель телефона, за период."""
+    end_date_inclusive = end_date + timedelta(days=1)
+
+    model_name_res = await db.execute(select(models.ModelName.id).filter(models.ModelName.name == model_name))
+    model_name_id = model_name_res.scalar_one_or_none()
+    if not model_name_id:
+        return []
+
+    query = (
+        select(models.Sales)
+        # Явно предзагружаем sale_details и вложенные warehouse
+        .options(
+            selectinload(models.Sales.sale_details)
+            .selectinload(models.SaleDetails.warehouse)
+        )
+        .join(models.SaleDetails, models.Sales.id == models.SaleDetails.sale_id)
+        .join(models.Warehouse, models.SaleDetails.warehouse_id == models.Warehouse.id)
+        .join(models.Phones, models.Warehouse.product_id == models.Phones.id)
+        .join(models.Models, models.Phones.model_id == models.Models.id)
+        .filter(
+            models.Models.model_name_id == model_name_id,
+            models.Sales.sale_date >= start_date,
+            models.Sales.sale_date < end_date_inclusive
+        )
+        .distinct()
+        .order_by(models.Sales.sale_date.desc())
+    )
+
+    result = await db.execute(query)
+    return result.scalars().all()
+

@@ -171,7 +171,7 @@ async def list_pending_orders(message: Message):
 
             # Создаем кнопку "Оплатить" для каждого заказа
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Оплатить", callback_data=f"pay_{order.id}")]
+                [InlineKeyboardButton(text="✅ Оплатить доставку", callback_data=f"pay_{order.id}")]
             ])
             await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
@@ -182,7 +182,7 @@ async def process_payment_start(callback_query: types.CallbackQuery, state: FSMC
     order_id = int(callback_query.data.split('_')[1])
     await state.update_data(order_id=order_id)
     await state.set_state(Payment.waiting_for_amount)
-    await bot.send_message(callback_query.from_user.id, f"Введите сумму оплаты для заказа ID: {order_id}")
+    await bot.send_message(callback_query.from_user.id, f"Введите сумму оплаты доставки для заказа ID: {order_id}")
     await callback_query.answer()
 
 @dp.message(Payment.waiting_for_amount)

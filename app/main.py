@@ -2363,7 +2363,7 @@ async def create_new_financial_snapshot(db: AsyncSession = Depends(get_db)):
     """Создает новый финансовый срез на текущую дату."""
     return await crud.create_financial_snapshot(db=db)
 
-WEBHOOK_URL = f"https://604aa28a8f19.ngrok-free.app/api/v1/telegram/webhook/{TELEGRAM_BOT_TOKEN}"
+WEBHOOK_URL = f"https://39909a43c6bc.ngrok-free.app/api/v1/telegram/webhook/{TELEGRAM_BOT_TOKEN}"
 
 @app.post("/api/v1/telegram/webhook/{token}")
 async def telegram_webhook(token: str, update: dict):
@@ -2405,4 +2405,49 @@ async def shutdown_event():
     scheduler.shutdown()
     print("Планировщик задач остановлен.")
 
+@app.get("/api/v1/analytics/products", response_model=List[schemas.ProductAnalyticsItem], tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_product_analytics(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает аналитику по продажам моделей телефонов за период."""
+    return await crud.get_product_analytics(db=db, start_date=start_date, end_date=end_date)
+
+@app.get("/api/v1/analytics/financials", response_model=schemas.FinancialAnalyticsResponse, tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_financial_analytics(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает данные для построения финансовых графиков."""
+    return await crud.get_financial_analytics(db=db, start_date=start_date, end_date=end_date)
+
+@app.get("/api/v1/sales/by-date", response_model=List[schemas.SaleResponse], tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_sales_by_date(target_date: date, db: AsyncSession = Depends(get_db)):
+    """Возвращает все продажи за указанный день."""
+    sales = await crud.get_sales_by_date(db=db, target_date=target_date)
+    # Используем вашу существующую функцию для форматирования ответа
+    return [await _format_sale_response(sale, db) for sale in sales]
+
+@app.get("/api/v1/cashflow/by-date", response_model=List[schemas.CashFlow], tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_cashflow_by_date(target_date: date, db: AsyncSession = Depends(get_db)):
+    """Возвращает все движения денег за указанный день."""
+    return await crud.get_cashflow_by_date(db=db, target_date=target_date)
+
+@app.get("/api/v1/analytics/products/details", response_model=List[schemas.SaleResponse], tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_product_analytics_details(
+    model_name: str,
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает детали продаж (чеки) для конкретной модели за период."""
+    sales = await crud.get_sales_for_product_analytics_details(db, model_name, start_date, end_date)
+    return [await _format_sale_response(sale, db) for sale in sales]
 
