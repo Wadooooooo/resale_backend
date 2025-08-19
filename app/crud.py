@@ -1207,6 +1207,7 @@ async def get_profit_report(db: AsyncSession, start_date: date, end_date: date) 
         .filter(models.CashFlow.date >= start_date)
         .filter(models.CashFlow.date < end_date_inclusive)
         .filter(models.OperationCategories.type == 'expense')
+        .filter(models.OperationCategories.view != 'Техническая операция')
     )
     total_expenses = expenses_result.scalar_one_or_none() or Decimal('0')
 
@@ -2868,7 +2869,8 @@ async def get_financial_analytics(db: AsyncSession, start_date: date, end_date: 
         .filter(
             models.CashFlow.date >= start_date, 
             models.CashFlow.date < end_date_inclusive,
-            models.OperationCategories.type == 'expense'
+            models.OperationCategories.type == 'expense',
+            models.OperationCategories.view != 'Техническая операция'
         )
         .group_by(models.OperationCategories.name)
     )

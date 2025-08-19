@@ -546,7 +546,8 @@ class OperationCategories(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[Optional[str]] = mapped_column(String(255))
     description: Mapped[Optional[str]] = mapped_column(Text)
-    type: Mapped[Optional[str]] = mapped_column(String(10)) # <--- ДОБАВЬТЕ ЭТУ СТРОКУ
+    type: Mapped[Optional[str]] = mapped_column(String(10))
+    view: Mapped[Optional[str]] = mapped_column(String(50))
 
     # Relationships
     cash_flows: Mapped[List["CashFlow"]] = relationship("CashFlow", back_populates="operation_category")
