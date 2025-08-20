@@ -3204,3 +3204,24 @@ async def get_inventory_analytics(db: AsyncSession, start_date: date, end_date: 
         "defect_by_supplier": sorted(defect_by_supplier, key=lambda x: x['defect_rate'], reverse=True)
     }
 
+async def create_refresh_token(db: AsyncSession, user_id: int, token: str, expires_at: datetime):
+    db_token = models.RefreshTokens(user_id=user_id, token=token, expires_at=expires_at)
+    db.add(db_token)
+    await db.commit()
+    await db.refresh(db_token)
+    return db_token
+
+async def get_refresh_token(db: AsyncSession, token: str):
+    result = await db.execute(
+        select(models.RefreshTokens)
+        .options(selectinload(models.RefreshTokens.user))
+        .filter(models.RefreshTokens.token == token)
+    )
+    return result.scalars().first()
+
+async def delete_refresh_token(db: AsyncSession, token: str):
+    db_token = await get_refresh_token(db, token)
+    if db_token:
+        await db.delete(db_token)
+        await db.commit()
+

@@ -912,3 +912,14 @@ class DepositPayments(Base):
     deposit: Mapped["Deposits"] = relationship("Deposits")
     account: Mapped["Accounts"] = relationship("Accounts")
     
+
+class RefreshTokens(Base):
+    __tablename__ = "refresh_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    token: Mapped[str] = mapped_column(String, index=True, unique=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    
+    user: Mapped["Users"] = relationship("Users")
+    

@@ -21,7 +21,8 @@ from .database import get_db
 # И храните его в секрете (лучше в переменных окружения)
 SECRET_KEY = "DKL11kdskl142324mmkfd2ndiu2hufniufnuiHUHIUE7y7"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+REFRESH_TOKEN_EXPIRE_DAYS = 30 
+ACCESS_TOKEN_EXPIRE_MINUTES = 15
 
 # Контекст для хеширования паролей
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -146,3 +147,17 @@ def require_any_permission(*permission_codes: str):
             )
     return _check_any_permission
 
+def create_refresh_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt, expire
+
+def decode_token(token: str):
+    """Декодирует любой токен и возвращает payload."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except JWTError:
+        return None

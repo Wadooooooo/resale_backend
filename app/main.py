@@ -625,11 +625,60 @@ async def login_for_access_token(
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    
+    # Создаем access token
     access_token_expires = timedelta(minutes=security.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = security.create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+
+    # Создаем refresh token
+    refresh_token, expires_at = security.create_refresh_token(data={"sub": user.username})
+    await crud.create_refresh_token(db, user_id=user.id, token=refresh_token, expires_at=expires_at)
+    
+    return {
+        "access_token": access_token, 
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
+
+# 2. Добавь два новых эндпоинта (можно разместить после эндпоинта /token)
+@app.post("/api/v1/auth/refresh", response_model=schemas.Token)
+async def refresh_access_token(
+    request: schemas.RefreshTokenRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    token_data = security.decode_token(request.refresh_token)
+    if not token_data:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    db_token = await crud.get_refresh_token(db, request.refresh_token)
+    if not db_token or db_token.expires_at < datetime.now(timezone.utc).replace(tzinfo=None):
+        raise HTTPException(status_code=401, detail="Refresh token expired or invalid")
+
+    user = db_token.user
+    
+    # Создаем новый access token
+    access_token_expires = timedelta(minutes=security.ACCESS_TOKEN_EXPIRE_MINUTES)
+    new_access_token = security.create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+
+    # Возвращаем новый access token и старый refresh token
+    return {
+        "access_token": new_access_token,
+        "refresh_token": request.refresh_token,
+        "token_type": "bearer"
+    }
+
+@app.post("/api/v1/auth/logout")
+async def logout(
+    request: schemas.RefreshTokenRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    await crud.delete_refresh_token(db, request.refresh_token)
+    return {"message": "Successfully logged out"}
+
 
 @app.get("/api/v1/users/me/", response_model=schemas.User)
 async def read_users_me(current_user: models.Users = Depends(security.get_current_active_user)):
