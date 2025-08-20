@@ -2439,47 +2439,6 @@ async def create_new_financial_snapshot(db: AsyncSession = Depends(get_db)):
     """Создает новый финансовый срез на текущую дату."""
     return await crud.create_financial_snapshot(db=db)
 
-WEBHOOK_URL = f"https://dfbe5d48baba.ngrok-free.app/api/v1/telegram/webhook/{TELEGRAM_BOT_TOKEN}"
-
-@app.post("/api/v1/telegram/webhook/{token}")
-async def telegram_webhook(token: str, update: dict):
-    """Принимает обновления от Telegram."""
-    if token != TELEGRAM_BOT_TOKEN:
-        raise HTTPException(status_code=403, detail="Invalid token")
-
-    telegram_update = types.Update(**update)
-    await dp.feed_update(bot=bot, update=telegram_update)
-    return {"ok": True}
-
-# Создаем экземпляр планировщика
-scheduler = AsyncIOScheduler(timezone="Asia/Yekaterinburg") # Укажите ваш часовой пояс
-
-# Добавляем нашу задачу в планировщик
-scheduler.add_job(close_overdue_shifts, 'cron', hour=23, minute=59)
-
-@app.on_event("startup")
-async def startup_event():
-    """Запускает планировщик и устанавливает вебхук при старте приложения."""
-    # Устанавливаем вебхук
-    webhook_info = await bot.get_webhook_info()
-    if webhook_info.url != WEBHOOK_URL:
-        await bot.set_webhook(url=WEBHOOK_URL)
-        print(">>> Вебхук для Telegram бота УСТАНОВЛЕН.")
-    else:
-        # ДОБАВЛЕН ЭТОТ БЛОК ДЛЯ ИНФОРМАТИВНОСТИ
-        print(">>> Вебхук для Telegram бота УЖЕ БЫЛ УСТАНОВЛЕН.")
-    
-    scheduler.start()
-    print("Планировщик задач запущен.")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Останавливает планировщик и удаляет вебхук при выключении приложения."""
-    await bot.delete_webhook()
-    print("Вебхук для Telegram бота удален.")
-
-    scheduler.shutdown()
-    print("Планировщик задач остановлен.")
 
 @app.get("/api/v1/analytics/products", response_model=List[schemas.ProductAnalyticsItem], tags=["Analytics"],
          dependencies=[Depends(security.require_permission("view_reports"))])
