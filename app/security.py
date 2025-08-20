@@ -1,6 +1,7 @@
 # app/security.py
 
 import os
+from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -14,12 +15,13 @@ from sqlalchemy.orm import selectinload
 from . import crud, schemas, models
 from .database import get_db
 
+load_dotenv()
 
 # --- Настройки безопасности ---
 
 # Генерируйте этот ключ командой: openssl rand -hex 32
 # И храните его в секрете (лучше в переменных окружения)
-SECRET_KEY = "DKL11kdskl142324mmkfd2ndiu2hufniufnuiHUHIUE7y7"
+SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 REFRESH_TOKEN_EXPIRE_DAYS = 30 
 ACCESS_TOKEN_EXPIRE_MINUTES = 15

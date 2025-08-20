@@ -1,11 +1,12 @@
-# app/database.py
-
+import os
+from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 
-SQLALCHEMY_DATABASE_URL = "postgresql+asyncpg://user:password@127.0.0.1:5432/resale100825"
+load_dotenv() # Загружает переменные из файла .env
 
-# Асинхронный движок
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
+
 engine = create_async_engine(SQLALCHEMY_DATABASE_URL)
 
 # Асинхронный генератор сессий
