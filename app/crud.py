@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload, joinedload, aliased
 from sqlalchemy import func, select, case, or_
 from . import models, schemas
 from datetime import date
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 from decimal import Decimal, InvalidOperation
 from sqlalchemy import select, or_
 from datetime import date, timedelta, datetime, time
@@ -655,6 +655,7 @@ async def receive_supplier_order(db: AsyncSession, order_id: int, user_id: int):
         raise HTTPException(status_code=400, detail="Заказ уже был получен")
 
     order.status = models.StatusDelivery.ПОЛУЧЕН
+    order.delivery_payment_status = models.OrderPaymentStatus.НЕ_ОПЛАЧЕН
 
     new_phones = []
     warehouse_entries = []
@@ -746,50 +747,49 @@ async def get_phones_ready_for_stock(db: AsyncSession):
     return result.scalars().unique().all()
 
 async def accept_phones_to_warehouse(db: AsyncSession, data: schemas.WarehouseAcceptanceRequest, user_id: int):
-    """Перемещает телефоны на склад и обновляет их статус."""
+    # Эта функция теперь просто выполняет свою работу и ничего не возвращает
     phones_to_update_result = await db.execute(
         select(models.Phones).filter(models.Phones.id.in_(data.phone_ids))
+        .options(selectinload(models.Phones.model))
     )
     phones_to_update = phones_to_update_result.scalars().all()
     
     shop = await db.get(models.Shops, data.shop_id)
     shop_name = shop.name if shop else "Неизвестный магазин"
     
-    warehouse_entries = []
-    log_entries = []
     for phone in phones_to_update:
         phone.commercial_status = models.CommerceStatus.НА_СКЛАДЕ
         
-        warehouse_entry = models.Warehouse(
-            product_type_id=1, 
-            product_id=phone.id,
-            quantity=1,
-            shop_id=data.shop_id,
-            storage_location=models.EnumShop.СКЛАД,
-            added_date=datetime.now(),
-            user_id=user_id
-        )
-        warehouse_entries.append(warehouse_entry)
-        log_entries.append(models.PhoneMovementLog(
-            phone_id=phone.id,
-            user_id=user_id,
-            event_type=models.PhoneEventType.ПРИНЯТ_НА_СКЛАД,
-            details=f"Принят на склад магазина '{shop_name}' (размещение: {warehouse_entry.storage_location.value})."
+        db.add(models.Warehouse(
+            product_type_id=1, product_id=phone.id, quantity=1, shop_id=data.shop_id,
+            storage_location=models.EnumShop.СКЛАД, added_date=datetime.now(), user_id=user_id
+        ))
+        db.add(models.PhoneMovementLog(
+            phone_id=phone.id, user_id=user_id, event_type=models.PhoneEventType.ПРИНЯТ_НА_СКЛАД,
+            details=f"Принят на склад магазина '{shop_name}'."
         ))
 
-    db.add_all(warehouse_entries)
-    db.add_all(log_entries)
-    await db.commit()
+        if phone.model:
+            waiting_list_query = select(models.WaitingList).where(
+                models.WaitingList.model_id == phone.model.id,
+                models.WaitingList.status == 0
+            )
+            waiting_list_results = await db.execute(waiting_list_query)
+            
+            for entry in waiting_list_results.scalars().all():
+                model_name_base = phone.model.model_name.name if phone.model.model_name else ""
+                storage_display = models.format_storage_for_display(phone.model.storage.storage) if phone.model.storage else ""
+                color_name = phone.model.color.color_name if phone.model.color else ""
+                full_model_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+
+                message = (
+                    f"🔔 Появился {full_model_name}, "
+                    f"который ждет клиент {entry.customer_name} ({entry.customer_phone or 'номер не указан'})."
+                )
+                await create_notification(db, user_id=entry.user_id, message=message, waiting_list_id=entry.id)
+                entry.status = 1
     
-    # Запрашиваем телефоны заново, чтобы вернуть актуальные данные со всеми связями
-    final_phones_result = await db.execute(
-        select(models.Phones).options(
-            selectinload(models.Phones.model).selectinload(models.Models.model_name),
-            selectinload(models.Phones.model).selectinload(models.Models.storage),
-            selectinload(models.Phones.model).selectinload(models.Models.color)
-        ).filter(models.Phones.id.in_(data.phone_ids))
-    )
-    return final_phones_result.scalars().all()
+    await db.commit()
 
 
 async def get_all_accessories(db: AsyncSession):
@@ -3224,4 +3224,451 @@ async def delete_refresh_token(db: AsyncSession, token: str):
     if db_token:
         await db.delete(db_token)
         await db.commit()
+
+async def get_tax_report(db: AsyncSession, start_date: date, end_date: date) -> dict:
+    """
+    Подсчитывает налоговую базу (доходы по карте) и сумму налога (6%) за период.
+    """
+    end_date_inclusive = end_date + timedelta(days=1)
+
+    # Запрос для суммирования всех платежей, проведенных по карте
+    card_revenue_query = (
+        select(func.sum(models.SalePayments.amount))
+        .join(models.Sales, models.SalePayments.sale_id == models.Sales.id)
+        .filter(
+            models.SalePayments.payment_method == models.EnumPayment.КАРТА,
+            models.Sales.sale_date >= start_date,
+            models.Sales.sale_date < end_date_inclusive
+        )
+    )
+
+    card_revenue_result = await db.execute(card_revenue_query)
+    total_card_revenue = card_revenue_result.scalar_one_or_none() or Decimal('0')
+
+    # Расчет налога
+    tax_amount = total_card_revenue * Decimal('0.06')
+
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "total_card_revenue": total_card_revenue,
+        "tax_amount": tax_amount
+    }
+
+def get_quarter_dates(year: int, quarter: int) -> (date, date):
+    """Возвращает начальную и конечную дату для указанного квартала."""
+    if quarter == 1:
+        return date(year, 1, 1), date(year, 3, 31)
+    elif quarter == 2:
+        return date(year, 4, 1), date(year, 6, 30)
+    elif quarter == 3:
+        return date(year, 7, 1), date(year, 9, 30)
+    elif quarter == 4:
+        return date(year, 10, 1), date(year, 12, 31)
+    else:
+        raise ValueError("Квартал должен быть от 1 до 4")
+
+async def get_quarterly_tax_report(db: AsyncSession, year: int, quarter: int) -> dict:
+    """
+    Подсчитывает налоговую базу и сумму налога для конкретного квартала.
+    """
+    try:
+        start_date, end_date = get_quarter_dates(year, quarter)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Используем уже существующую функцию, передавая ей правильные даты
+    return await get_tax_report(db, start_date, end_date)
+
+async def get_margin_analytics(db: AsyncSession, start_date: date, end_date: date) -> List[dict]:
+    """Собирает аналитику по маржинальности проданных моделей телефонов."""
+    end_date_inclusive = end_date + timedelta(days=1)
+
+    query = (
+        select(
+            models.ModelName.name,
+            func.avg(models.SaleDetails.unit_price).label("avg_sale_price"),
+            func.avg(models.Phones.purchase_price).label("avg_purchase_price")
+        )
+        .join(models.Sales, models.SaleDetails.sale_id == models.Sales.id)
+        .join(models.Warehouse, models.SaleDetails.warehouse_id == models.Warehouse.id)
+        .join(models.Phones, models.Warehouse.product_id == models.Phones.id)
+        .join(models.Models, models.Phones.model_id == models.Models.id)
+        .join(models.ModelName, models.Models.model_name_id == models.ModelName.id)
+        .where(
+            models.Warehouse.product_type_id == 1,
+            models.Sales.sale_date >= start_date,
+            models.Sales.sale_date < end_date_inclusive,
+            models.SaleDetails.unit_price > 0  # Исключаем подарочные товары
+        )
+        .group_by(models.ModelName.name)
+    )
+
+    result = await db.execute(query)
+    
+    analytics_data = []
+    for row in result.all():
+        avg_sale = row.avg_sale_price or Decimal('0')
+        avg_purchase = row.avg_purchase_price or Decimal('0')
+        
+        margin_percent = Decimal('0')
+        if avg_sale > 0:
+            margin_percent = ((avg_sale - avg_purchase) / avg_sale) * 100
+
+        analytics_data.append({
+            "model_name": row.name,
+            "avg_sale_price": avg_sale,
+            "avg_purchase_price": avg_purchase,
+            "margin_percent": margin_percent
+        })
+        
+    return analytics_data
+
+async def get_sell_through_analytics(db: AsyncSession, start_date: date, end_date: date) -> dict:
+    """
+    Рассчитывает коэффициент реализации (Sell-Through Rate) за период.
+    """
+    end_date_inclusive = end_date + timedelta(days=1)
+
+    # 1. Считаем, сколько было продано телефонов за период
+    sold_query = (
+        select(func.sum(models.SaleDetails.quantity))
+        .join(models.Sales)
+        .join(models.Warehouse)
+        .where(
+            models.Warehouse.product_type_id == 1,
+            models.Sales.sale_date >= start_date,
+            models.Sales.sale_date < end_date_inclusive
+        )
+    )
+    sold_count = (await db.execute(sold_query)).scalar_one_or_none() or 0
+
+    # 2. Считаем, сколько телефонов поступило за период
+    received_query = select(func.count(models.Phones.id)).where(
+        models.Phones.added_date >= start_date,
+        models.Phones.added_date <= end_date
+    )
+    received_count = (await db.execute(received_query)).scalar_one_or_none() or 0
+
+    # 3. Считаем, какой был сток на начало периода
+    # Это телефоны, которые поступили до начала периода и не были проданы до его начала.
+    initial_stock_subquery = (
+        select(models.Phones.id)
+        .outerjoin(models.Warehouse, (models.Phones.id == models.Warehouse.product_id) & (models.Warehouse.product_type_id == 1))
+        .outerjoin(models.SaleDetails, models.Warehouse.id == models.SaleDetails.warehouse_id)
+        .outerjoin(models.Sales, models.SaleDetails.sale_id == models.Sales.id)
+        .where(models.Phones.added_date < start_date)
+        .group_by(models.Phones.id)
+        .having(or_(func.max(models.Sales.sale_date) >= start_date, func.max(models.Sales.sale_date).is_(None)))
+    )
+    initial_stock_count = (await db.execute(select(func.count()).select_from(initial_stock_subquery.subquery()))).scalar_one()
+
+    # 4. Рассчитываем итоговые показатели
+    total_available = initial_stock_count + received_count
+    sell_through_rate = (sold_count / total_available * 100) if total_available > 0 else 0
+
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "initial_stock_count": initial_stock_count,
+        "received_count": received_count,
+        "sold_count": sold_count,
+        "sell_through_rate": sell_through_rate,
+    }
+
+async def get_abc_analysis(db: AsyncSession, start_date: date, end_date: date) -> dict:
+    """Проводит ABC-анализ по выручке от продажи телефонов."""
+    end_date_inclusive = end_date + timedelta(days=1)
+
+    # 1. Получаем выручку по каждой модели телефона
+    revenue_query = (
+        select(
+            models.ModelName.name.label("model_name"),
+            func.sum(models.SaleDetails.unit_price * models.SaleDetails.quantity).label("total_revenue")
+        )
+        .join(models.Sales, models.SaleDetails.sale_id == models.Sales.id)
+        .join(models.Warehouse, models.SaleDetails.warehouse_id == models.Warehouse.id)
+        .join(models.Phones, models.Warehouse.product_id == models.Phones.id)
+        .join(models.Models, models.Phones.model_id == models.Models.id)
+        .join(models.ModelName, models.Models.model_name_id == models.ModelName.id)
+        .where(
+            models.Warehouse.product_type_id == 1,
+            models.Sales.sale_date >= start_date,
+            models.Sales.sale_date < end_date_inclusive
+        )
+        .group_by(models.ModelName.name)
+        .order_by(func.sum(models.SaleDetails.unit_price * models.SaleDetails.quantity).desc())
+    )
+    
+    revenue_results = (await db.execute(revenue_query)).mappings().all()
+
+    if not revenue_results:
+        return {"total_revenue": 0, "group_a": [], "group_b": [], "group_c": []}
+
+    # 2. Считаем общую выручку
+    total_revenue = sum(item['total_revenue'] for item in revenue_results)
+
+    # 3. Проводим классификацию
+    group_a, group_b, group_c = [], [], []
+    cumulative_revenue = Decimal('0')
+
+    for item in revenue_results:
+        cumulative_revenue += item['total_revenue']
+        cumulative_percentage = (cumulative_revenue / total_revenue) * 100 if total_revenue > 0 else 0
+        
+        item_data = {
+            "model_name": item['model_name'],
+            "total_revenue": item['total_revenue'],
+            "revenue_percentage": (item['total_revenue'] / total_revenue) * 100 if total_revenue > 0 else 0
+        }
+
+        if cumulative_percentage <= 80:
+            group_a.append(item_data)
+        elif cumulative_percentage <= 95:
+            group_b.append(item_data)
+        else:
+            group_c.append(item_data)
+
+    return {
+        "total_revenue": total_revenue,
+        "group_a": group_a,
+        "group_b": group_b,
+        "group_c": group_c
+    }
+
+async def get_repeat_purchase_analytics(db: AsyncSession, start_date: date, end_date: date) -> dict:
+    """
+    Рассчитывает долю повторных покупок за выбранный период.
+    """
+    end_date_inclusive = end_date + timedelta(days=1)
+
+    # 1. Находим всех уникальных клиентов, совершивших покупку в ЭТОМ периоде
+    customers_in_period_query = (
+        select(models.Sales.customer_id)
+        .distinct()
+        .where(
+            models.Sales.sale_date >= start_date,
+            models.Sales.sale_date < end_date_inclusive,
+            models.Sales.customer_id.is_not(None)
+        )
+    )
+    customers_in_period_result = (await db.execute(customers_in_period_query)).scalars().all()
+    total_customers_in_period = len(customers_in_period_result)
+
+    if total_customers_in_period == 0:
+        return { "total_customers": 0, "repeat_customers": 0, "repeat_rate": 0.0 }
+
+    # 2. Из этих клиентов считаем тех, у кого есть покупки ДО начала этого периода
+    repeat_customers_query = (
+        select(func.count(models.Sales.customer_id.distinct()))
+        .where(
+            models.Sales.customer_id.in_(customers_in_period_result),
+            models.Sales.sale_date < start_date
+        )
+    )
+    repeat_customer_count = (await db.execute(repeat_customers_query)).scalar_one()
+
+    # 3. Считаем итоговый процент
+    repeat_rate = (repeat_customer_count / total_customers_in_period * 100) if total_customers_in_period > 0 else 0
+
+    return {
+        "total_customers": total_customers_in_period,
+        "repeat_customers": repeat_customer_count,
+        "repeat_rate": repeat_rate
+    }
+
+async def get_average_check_analytics(db: AsyncSession, start_date: date, end_date: date) -> dict:
+    """
+    Рассчитывает средний чек: общий, по сотрудникам и по источникам трафика.
+    """
+    end_date_inclusive = end_date + timedelta(days=1)
+    
+    base_query = (
+        select(
+            func.count(models.Sales.id).label("sales_count"),
+            func.sum(models.Sales.total_amount).label("total_revenue")
+        )
+        .where(
+            models.Sales.sale_date >= start_date,
+            models.Sales.sale_date < end_date_inclusive
+        )
+    )
+
+    # 1. Общий средний чек
+    total_result = (await db.execute(base_query)).mappings().one_or_none()
+    overall_average_check = (total_result['total_revenue'] / total_result['sales_count']) if total_result and total_result['sales_count'] > 0 else Decimal('0')
+
+    # 2. Средний чек по сотрудникам
+    by_employee_query = (
+        base_query
+        .add_columns(models.Users.name.label("user_name"), models.Users.username)
+        .join(models.Users, models.Sales.user_id == models.Users.id)
+        .group_by(models.Users.id)
+    )
+    by_employee_result = (await db.execute(by_employee_query)).mappings().all()
+    
+    # 3. Средний чек по источникам трафика
+    by_source_query = (
+        base_query
+        .add_columns(models.TrafficSource.name.label("source_name"))
+        .join(models.Customers, models.Sales.customer_id == models.Customers.id)
+        .join(models.TrafficSource, models.Customers.source_id == models.TrafficSource.id)
+        .group_by(models.TrafficSource.id)
+    )
+    by_source_result = (await db.execute(by_source_query)).mappings().all()
+
+    return {
+        "overall_average_check": overall_average_check,
+        "by_employee": [
+            {
+                "name": item['user_name'] or item['username'],
+                "sales_count": item['sales_count'],
+                "average_check": (item['total_revenue'] / item['sales_count']) if item['sales_count'] > 0 else 0
+            } for item in by_employee_result
+        ],
+        "by_source": [
+            {
+                "name": item['source_name'],
+                "sales_count": item['sales_count'],
+                "average_check": (item['total_revenue'] / item['sales_count']) if item['sales_count'] > 0 else 0
+            } for item in by_source_result
+        ]
+    }
+
+async def get_cash_flow_forecast(db: AsyncSession, forecast_days: int = 30) -> dict:
+    """
+    Прогнозирует движение денежных средств на N дней вперед.
+    """
+    # 1. Получаем текущий общий баланс
+    starting_balance = await get_total_balance(db)
+
+    # 2. Считаем средние дневные доходы за последние 90 дней
+    historical_days = 90
+    past_date = date.today() - timedelta(days=historical_days)
+    
+    revenue_query = select(func.sum(models.Sales.total_amount)).where(
+        models.Sales.sale_date >= past_date
+    )
+    total_revenue = (await db.execute(revenue_query)).scalar_one_or_none() or Decimal('0')
+    avg_daily_revenue = total_revenue / historical_days
+
+    # 3. Считаем средние дневные расходы за последние 90 дней
+    expense_query = (
+        select(func.sum(models.CashFlow.amount))
+        .join(models.OperationCategories)
+        .where(
+            models.CashFlow.date >= past_date,
+            models.OperationCategories.type == 'expense',
+            models.OperationCategories.view != 'Техническая операция' # Исключаем внутренние переводы
+        )
+    )
+    total_expenses = (await db.execute(expense_query)).scalar_one_or_none() or Decimal('0')
+    avg_daily_expenses = abs(total_expenses / historical_days) # Расходы отрицательные, берем модуль
+
+    # 4. Строим прогноз
+    projected_inflows = avg_daily_revenue * forecast_days
+    projected_outflows = avg_daily_expenses * forecast_days
+    projected_ending_balance = starting_balance + projected_inflows - projected_outflows
+
+    return {
+        "start_balance": starting_balance,
+        "projected_inflows": projected_inflows,
+        "projected_outflows": projected_outflows,
+        "projected_ending_balance": projected_ending_balance,
+        "forecast_days": forecast_days,
+        "historical_days_used": historical_days,
+    }
+
+
+
+async def create_waiting_list_entry(db: AsyncSession, entry_data: schemas.WaitingListCreate, user_id: int):
+    """Создает новую запись в листе ожидания."""
+    db_entry = models.WaitingList(**entry_data.model_dump(), user_id=user_id)
+    db.add(db_entry)
+    await db.commit()
+    await db.refresh(db_entry)
+    return db_entry
+
+
+async def get_active_waiting_list(db: AsyncSession):
+    """Получает все активные записи из листа ожидания с загруженными связями."""
+    query = (
+        select(models.WaitingList)
+        .options(
+            selectinload(models.WaitingList.model).options(
+                selectinload(models.Models.model_name),
+                selectinload(models.Models.storage),
+                selectinload(models.Models.color)
+            ),
+            selectinload(models.WaitingList.user)
+        )
+        .where(models.WaitingList.status == 0)
+        .order_by(models.WaitingList.created_at.desc())
+    )
+    result = await db.execute(query)
+    return result.scalars().all()
+
+async def update_waiting_list_status(db: AsyncSession, entry_id: int, new_status: int):
+    """Обновляет статус записи в листе ожидания."""
+    entry = await db.get(models.WaitingList, entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Запись не найдена")
+    
+    # 1. Меняем статус и сохраняем изменение в базу
+    entry.status = new_status
+    await db.commit()
+
+    # 2. Теперь, когда изменение сохранено, делаем новый чистый запрос,
+    #    чтобы получить обновленный объект со всеми связями для ответа.
+    result = await db.execute(
+        select(models.WaitingList)
+        .options(
+            selectinload(models.WaitingList.model).options(
+                selectinload(models.Models.model_name),
+                selectinload(models.Models.storage),
+                selectinload(models.Models.color)
+            ),
+            selectinload(models.WaitingList.user)
+        )
+        .filter(models.WaitingList.id == entry_id)
+    )
+    # Возвращаем свежий, полностью загруженный объект
+    return result.scalars().one()
+
+async def create_notification(db: AsyncSession, user_id: int, message: str, waiting_list_id: int):
+    """Создает новое уведомление для пользователя."""
+    new_notification = models.Notification(
+        user_id=user_id,
+        message=message,
+        waiting_list_id=waiting_list_id
+    )
+    db.add(new_notification)
+    await db.flush()
+    return new_notification
+
+async def get_unread_notifications_for_user(db: AsyncSession, user_id: int):
+    """Получает все непрочитанные уведомления для пользователя."""
+    query = (
+        select(models.Notification)
+        .where(models.Notification.user_id == user_id, models.Notification.is_read == False)
+        .order_by(models.Notification.created_at.desc())
+    )
+    result = await db.execute(query)
+    return result.scalars().all()
+
+async def mark_notification_as_read(db: AsyncSession, notification_id: int, user_id: int):
+    """Отмечает уведомление как прочитанное."""
+    notification = await db.get(models.Notification, notification_id)
+    if not notification:
+        raise HTTPException(status_code=404, detail="Уведомление не найдено")
+    if notification.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Это не ваше уведомление")
+    
+    notification.is_read = True
+    await db.commit()
+    
+    # После коммита делаем новый запрос, чтобы получить "свежий" объект для ответа.
+    # Это предотвращает ошибку MissingGreenlet.
+    fresh_notification = await db.get(models.Notification, notification_id)
+    return fresh_notification
 

@@ -202,7 +202,10 @@ async def list_pending_orders_handler(message: Message, db_user: models.Users):
     """Показывает заказы, ожидающие оплаты."""
     async with AsyncSessionLocal() as session:
         orders = await crud.get_supplier_orders(session)
-        pending_orders = [o for o in orders if o.payment_status.value != 'ОПЛАЧЕН']
+        pending_orders = [
+            o for o in orders 
+            if o.status.value == 'ПОЛУЧЕН' and o.delivery_payment_status.value != 'ОПЛАЧЕН'
+        ]
 
         if not pending_orders:
             await message.answer("Заказов, ожидающих оплаты, нет.")
@@ -265,12 +268,24 @@ async def process_account_selected(callback_query: types.CallbackQuery, state: F
     """Завершает операцию после выбора счета."""
     account_id = int(callback_query.data.split('_')[1])
     user_data = await state.get_data()
+    order_id = user_data['order_id']
 
     try:
         async with AsyncSessionLocal() as session:
             # --- НАЧАЛО ИЗМЕНЕНИЙ ---
 
-            # 1. Находим в базе контрагента "СДЭК"
+            # 1. Находим сам заказ в базе данных
+            order_to_update_stmt = select(models.SupplierOrders).where(models.SupplierOrders.id == order_id)
+            order_result = await session.execute(order_to_update_stmt)
+            order_to_update = order_result.scalars().first()
+
+            if not order_to_update:
+                await bot.send_message(callback_query.from_user.id, f"❌ Ошибка: Заказ ID {order_id} не найден.")
+                await state.clear()
+                await callback_query.answer()
+                return
+
+            # 2. Находим контрагента и категорию (этот код у вас уже есть)
             sdek_stmt = select(models.Counterparties).where(models.Counterparties.name == 'СДЭК')
             sdek_result = await session.execute(sdek_stmt)
             sdek_counterparty = sdek_result.scalars().first()
@@ -292,18 +307,19 @@ async def process_account_selected(callback_query: types.CallbackQuery, state: F
                 await callback_query.answer()
                 return
 
-            # 3. Создаем данные для операции, добавив ID контрагента
+            # 3. Создаем финансовую операцию (этот код у вас уже есть)
             cash_flow_data = schemas.CashFlowCreate(
                 operation_categories_id=transport_category.id,
                 account_id=account_id,
-                counterparty_id=sdek_counterparty.id,  # <-- Добавлено
+                counterparty_id=sdek_counterparty.id,
                 amount=-abs(user_data['amount']),
-                description=f"Оплата доставки (СДЭК) по заказу ID {user_data['order_id']}" # <-- Обновлено
+                description=f"Оплата доставки (СДЭК) по заказу ID {order_id}"
             )
+            await crud.create_cash_flow(db=session, cash_flow=cash_flow_data, user_id=1) # Предполагая user_id=1 для системных операций
 
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-            await crud.create_cash_flow(db=session, cash_flow=cash_flow_data, user_id=1)
+            # 4. Обновляем статус доставки у заказа и сохраняем
+            order_to_update.delivery_payment_status = models.OrderPaymentStatus.ОПЛАЧЕН
+            await session.commit()
 
             await bot.send_message(
                 callback_query.from_user.id,

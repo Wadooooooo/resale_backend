@@ -119,6 +119,14 @@ class ModelDetail(BaseModel):
     class Config:
         from_attributes = True # KEEP: Хотя мы будем явно создавать, это может помочь
 
+class ModelInfo(BaseModel):
+    id: int
+    model_name: Optional[ModelName] = None
+    storage: Optional[Storage] = None
+    color: Optional[Color] = None
+
+    class Config:
+        from_attributes = True
 
 
 class Accessory(BaseModel): # <--- УБЕДИТЕСЬ, ЧТО ЭТОТ КЛАСС ПРИСУТСТВУЕТ
@@ -860,4 +868,97 @@ class InventoryAnalyticsResponse(CustomBaseModel):
     slow_moving_stock: List[SlowMovingStockItem]
     defect_by_model: List[DefectRateByModel]
     defect_by_supplier: List[DefectRateBySupplier]
+
+class TaxReport(BaseModel):
+    start_date: date
+    end_date: date
+    total_card_revenue: Decimal
+    tax_amount: Decimal
+
+class MarginAnalyticsItem(CustomBaseModel):
+    model_name: str
+    avg_sale_price: Decimal
+    avg_purchase_price: Decimal
+    margin_percent: Decimal
+
+class SellThroughReport(BaseModel):
+    start_date: date
+    end_date: date
+    initial_stock_count: int
+    received_count: int
+    sold_count: int
+    sell_through_rate: float
+
+class AbcAnalysisItem(CustomBaseModel):
+    model_name: str
+    total_revenue: Decimal
+    revenue_percentage: Decimal
+
+class AbcAnalysisReport(CustomBaseModel):
+    total_revenue: Decimal
+    group_a: List[AbcAnalysisItem]
+    group_b: List[AbcAnalysisItem]
+    group_c: List[AbcAnalysisItem]
+
+class RepeatPurchaseReport(BaseModel):
+    total_customers: int
+    repeat_customers: int
+    repeat_rate: float
+
+class AverageCheckItem(BaseModel):
+    name: str
+    sales_count: int
+    average_check: Decimal
+
+class AverageCheckReport(BaseModel):
+    overall_average_check: Decimal
+    by_employee: List[AverageCheckItem]
+    by_source: List[AverageCheckItem]
+
+class CashFlowForecastReport(BaseModel):
+    start_balance: Decimal
+    projected_inflows: Decimal
+    projected_outflows: Decimal
+    projected_ending_balance: Decimal
+    forecast_days: int
+    historical_days_used: int
+
+class WaitingListBase(BaseModel):
+    customer_name: str
+    customer_phone: Optional[str] = None
+    model_id: int
+
+class WaitingListCreate(WaitingListBase):
+    pass
+
+class WaitingListEntry(WaitingListBase):
+    id: int
+    created_at: datetime
+    status: int
+    model: ModelInfo 
+    user: UserInLog
+
+    class Config:
+        from_attributes = True
+
+
+class WaitingListCreateResponse(WaitingListBase):
+    id: int
+    user_id: int
+    status: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class WaitingListStatusUpdate(BaseModel):
+    status: int
+
+class Notification(BaseModel):
+    id: int
+    message: str
+    is_read: bool
+    created_at: datetime
+    class Config:
+        from_attributes = True
 

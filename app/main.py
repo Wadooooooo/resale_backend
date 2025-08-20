@@ -4,7 +4,7 @@ from . import security
 
 from fastapi.exceptions import RequestValidationError
 from sqlalchemy import text
-from datetime import timedelta, date, datetime, time
+from datetime import timedelta, date, datetime, time, timezone
 from typing import List, Optional
 from pydantic import BaseModel
 from decimal import Decimal
@@ -653,7 +653,7 @@ async def refresh_access_token(
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
     db_token = await crud.get_refresh_token(db, request.refresh_token)
-    if not db_token or db_token.expires_at < datetime.now(timezone.utc).replace(tzinfo=None):
+    if not db_token or db_token.expires_at < datetime.utcnow():
         raise HTTPException(status_code=401, detail="Refresh token expired or invalid")
 
     user = db_token.user
@@ -1343,40 +1343,27 @@ async def accept_phones_to_warehouse_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: schemas.User = Depends(security.get_current_active_user)
 ):
-    updated_phones = await crud.accept_phones_to_warehouse(db=db, data=data, user_id=current_user.id)
-
-    # --- НАЧАЛО БЛОКА ФОРМАТИРОВАНИЯ ---
-    formatted_phones = []
-    for phone in updated_phones:
-        phone_dict = {
-            "id": phone.id,
-            "serial_number": phone.serial_number,
-            "technical_status": phone.technical_status.value if phone.technical_status else None,
-            "commercial_status": phone.commercial_status.value if phone.commercial_status else None,
-            "added_date": phone.added_date,
-            "model": None
-        }
-
-        if phone.model:
-            model_name_base = phone.model.model_name.name if phone.model.model_name else ""
-            storage_display = models.format_storage_for_display(phone.model.storage.storage) if phone.model.storage else ""
-            color_name = phone.model.color.color_name if phone.model.color else ""
-
-            full_name_parts = [part for part in [model_name_base, storage_display, color_name] if part]
-            full_display_name = " ".join(full_name_parts)
-
-            phone_dict['model'] = schemas.ModelDetail(
-                id=phone.model.id,
-                name=full_display_name,
-                base_name=model_name_base,
-                model_name_id=phone.model.model_name_id,
-                storage_id=phone.model.storage_id,
-                color_id=phone.model.color_id
-            )
-        
-        formatted_phones.append(schemas.Phone.model_validate(phone_dict))
+    # 1. Вызываем CRUD-функцию, которая обновляет данные в базе
+    await crud.accept_phones_to_warehouse(db=db, data=data, user_id=current_user.id)
     
-    return formatted_phones
+    # 2. Делаем НОВЫЙ запрос, чтобы получить свежие данные,
+    #    но на этот раз "жадно" загружаем АБСОЛЮТНО ВСЕ связи, которые нужны для форматирования
+    updated_phones_result = await db.execute(
+        select(models.Phones).filter(models.Phones.id.in_(data.phone_ids))
+        .options(
+            selectinload(models.Phones.model).options(
+                selectinload(models.Models.model_name),
+                selectinload(models.Models.storage),
+                selectinload(models.Models.color)
+            ),
+            selectinload(models.Phones.model_number),
+            selectinload(models.Phones.supplier_order) # <--- ВОТ ЭТА СТРОКА ВСЕ ИСПРАВИТ
+        )
+    )
+    updated_phones = updated_phones_result.scalars().unique().all() # .unique() важен для корректной сборки
+
+    # 3. Форматируем свежие и полностью загруженные данные
+    return [_format_phone_response(p) for p in updated_phones]
 
 @app.get("/api/v1/accessory-categories", response_model=List[schemas.CategoryAccessory], tags=["Accessories"], dependencies=[Depends(security.require_permission("manage_inventory"))])
 async def read_accessory_categories(db: AsyncSession = Depends(get_db), current_user: schemas.User = Depends(security.get_current_active_user)):
@@ -1805,6 +1792,32 @@ async def read_profit_report(
     report_data = await crud.get_profit_report(db=db, start_date=start_date, end_date=end_date)
     return schemas.ProfitReport(**report_data)
 
+@app.get("/api/v1/reports/tax", 
+         response_model=schemas.TaxReport,
+         tags=["Reports"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_tax_report(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Возвращает отчет по налогу УСН (Доходы 6%) за период."""
+    report_data = await crud.get_tax_report(db=db, start_date=start_date, end_date=end_date)
+    return schemas.TaxReport(**report_data)
+
+@app.get("/api/v1/reports/quarterly-tax",
+         response_model=schemas.TaxReport,
+         tags=["Reports"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_quarterly_tax_report(
+    year: int,
+    quarter: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Возвращает отчет по налогу УСН для конкретного квартала."""
+    return await crud.get_quarterly_tax_report(db=db, year=year, quarter=quarter)
 
 # --- Эндпоинты для совместимости Аксессуаров ---
 
@@ -2529,4 +2542,108 @@ async def read_inventory_analytics(
 ):
     """Возвращает аналитику по складу."""
     return await crud.get_inventory_analytics(db=db, start_date=start_date, end_date=end_date)
+
+@app.get("/api/v1/analytics/margins", response_model=List[schemas.MarginAnalyticsItem], tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_margin_analytics(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает аналитику по маржинальности моделей за период."""
+    return await crud.get_margin_analytics(db=db, start_date=start_date, end_date=end_date)
+
+@app.get("/api/v1/analytics/sell-through", response_model=schemas.SellThroughReport, tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_sell_through_analytics(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает отчет по оборачиваемости (Sell-Through Rate)."""
+    return await crud.get_sell_through_analytics(db=db, start_date=start_date, end_date=end_date)
+
+@app.get("/api/v1/analytics/abc-analysis", response_model=schemas.AbcAnalysisReport, tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_abc_analysis(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает ABC-анализ товаров по выручке."""
+    return await crud.get_abc_analysis(db=db, start_date=start_date, end_date=end_date)
+
+@app.get("/api/v1/analytics/repeat-customers", response_model=schemas.RepeatPurchaseReport, tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_repeat_customer_analytics(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает аналитику по повторным покупкам."""
+    return await crud.get_repeat_purchase_analytics(db=db, start_date=start_date, end_date=end_date)
+
+@app.get("/api/v1/analytics/average-check", response_model=schemas.AverageCheckReport, tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_average_check_analytics(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает аналитику по среднему чеку."""
+    return await crud.get_average_check_analytics(db=db, start_date=start_date, end_date=end_date)
+
+@app.get("/api/v1/analytics/cash-flow-forecast", response_model=schemas.CashFlowForecastReport, tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_cash_flow_forecast(
+    forecast_days: int = 30,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает прогноз движения денежных средств."""
+    return await crud.get_cash_flow_forecast(db=db, forecast_days=forecast_days)
+
+@app.post("/api/v1/waiting-list", response_model=schemas.WaitingListCreateResponse, tags=["Waiting List"],
+          dependencies=[Depends(security.require_permission("perform_sales"))])
+async def add_to_waiting_list(
+    entry_data: schemas.WaitingListCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Добавляет клиента в лист ожидания."""
+    new_entry = await crud.create_waiting_list_entry(db, entry_data, current_user.id)
+    return new_entry
+
+@app.get("/api/v1/waiting-list", response_model=List[schemas.WaitingListEntry], tags=["Waiting List"],
+        dependencies=[Depends(security.require_permission("perform_sales"))])
+async def get_waiting_list(db: AsyncSession = Depends(get_db)):
+    """Получает активный лист ожидания."""
+    return await crud.get_active_waiting_list(db)
+
+@app.put("/api/v1/waiting-list/{entry_id}/status", response_model=schemas.WaitingListEntry, tags=["Waiting List"],
+         dependencies=[Depends(security.require_permission("perform_sales"))])
+async def change_waiting_list_status(
+    entry_id: int,
+    update_data: schemas.WaitingListStatusUpdate,
+    db: AsyncSession = Depends(get_db)
+):
+    """Обновляет статус записи (например, выполнено)."""
+    updated_entry = await crud.update_waiting_list_status(db, entry_id, update_data.status)
+    return updated_entry
+
+@app.get("/api/v1/notifications", response_model=List[schemas.Notification], tags=["Notifications"])
+async def get_my_unread_notifications(
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Получает непрочитанные уведомления для текущего пользователя."""
+    return await crud.get_unread_notifications_for_user(db, user_id=current_user.id)
+
+@app.put("/api/v1/notifications/{notification_id}/read", response_model=schemas.Notification, tags=["Notifications"])
+async def mark_notification_read(
+    notification_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Отмечает уведомление как прочитанное."""
+    return await crud.mark_notification_as_read(db, notification_id, current_user.id)
 

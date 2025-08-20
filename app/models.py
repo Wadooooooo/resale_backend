@@ -112,9 +112,9 @@ class SupplierOrders(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     supplier_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("supplier.id"))
     order_date: Mapped[Optional[datetime]] = mapped_column(DateTime)
-    status: Mapped[Optional[StatusDelivery]] = mapped_column(Enum(StatusDelivery, native_enum=False)) # <-- ИЗМЕНЕНИЕ
-    
+    status: Mapped[Optional[StatusDelivery]] = mapped_column(Enum(StatusDelivery, native_enum=False)) 
     payment_status: Mapped[Optional[OrderPaymentStatus]] = mapped_column(Enum(OrderPaymentStatus, native_enum=False), default=OrderPaymentStatus.НЕ_ОПЛАЧЕН)
+    delivery_payment_status: Mapped[Optional[OrderPaymentStatus]] = mapped_column(Enum(OrderPaymentStatus, native_enum=False), default=OrderPaymentStatus.НЕ_ОПЛАЧЕН, nullable=False)
 
     supplier: Mapped[Optional["Supplier"]] = relationship("Supplier", back_populates="supplier_orders")
     phones: Mapped[List["Phones"]] = relationship("Phones", back_populates="supplier_order")
@@ -922,4 +922,36 @@ class RefreshTokens(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     
     user: Mapped["Users"] = relationship("Users")
+
+class WaitingList(Base):
+    __tablename__ = "waiting_list"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_name: Mapped[str] = mapped_column(String(255))
+    customer_phone: Mapped[Optional[str]] = mapped_column(String(50))
+    model_id: Mapped[int] = mapped_column(Integer, ForeignKey("models.id"))
     
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
+    
+    # 0 - active, 1 - notified, 2 - completed/cancelled
+    status: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    model: Mapped["Models"] = relationship("Models")
+    user: Mapped["Users"] = relationship("Users")
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
+    message: Mapped[str] = mapped_column(String(512), nullable=False)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    
+    # Опциональная ссылка на заявку в листе ожидания
+    waiting_list_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("waiting_list.id"))
+
+    user: Mapped["Users"] = relationship("Users")
+    waiting_list_entry: Mapped[Optional["WaitingList"]] = relationship("WaitingList")
+
