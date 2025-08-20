@@ -1143,6 +1143,11 @@ async def get_cash_flows(db: AsyncSession, skip: int = 0, limit: int = 100):
     """Получает список всех денежных операций."""
     result = await db.execute(
         select(models.CashFlow)
+        .options(
+            selectinload(models.CashFlow.operation_category),
+            selectinload(models.CashFlow.account),
+            selectinload(models.CashFlow.counterparty)
+        )
         .order_by(models.CashFlow.date.desc())
         .offset(skip)
         .limit(limit)
@@ -2951,4 +2956,251 @@ async def get_sales_for_product_analytics_details(db: AsyncSession, model_name: 
 
     result = await db.execute(query)
     return result.scalars().all()
+
+async def get_employee_analytics(db: AsyncSession, start_date: date, end_date: date):
+    """Собирает и рассчитывает аналитику по эффективности сотрудников за период."""
+    end_date_inclusive = end_date + timedelta(days=1)
+
+    # 1. Аналитика по продажам
+    sales_query = (
+        select(
+            models.Users.id.label("user_id"),
+            func.coalesce(models.Users.name, models.Users.username).label("user_name"),
+            func.sum(models.Sales.total_amount).label("total_revenue"),
+            func.count(models.Sales.id).label("sales_count"),
+            func.sum(models.SaleDetails.quantity).label("phones_sold")
+        )
+        .join(models.Sales, models.Users.id == models.Sales.user_id)
+        .join(models.SaleDetails, models.Sales.id == models.SaleDetails.sale_id)
+        .join(models.Warehouse, models.SaleDetails.warehouse_id == models.Warehouse.id)
+        .filter(
+            models.Sales.sale_date >= start_date,
+            models.Sales.sale_date < end_date_inclusive,
+            models.Warehouse.product_type_id == 1 # Считаем только телефоны
+        )
+        .group_by(models.Users.id)
+    )
+    sales_results = await db.execute(sales_query)
+    
+    sales_performance = []
+    for row in sales_results:
+        avg_check_size = row.total_revenue / row.sales_count if row.sales_count > 0 else 0
+        sales_performance.append({
+            "user_id": row.user_id,
+            "user_name": row.user_name,
+            "total_revenue": row.total_revenue or 0,
+            "phones_sold": row.phones_sold or 0,
+            "sales_count": row.sales_count or 0,
+            "avg_check_size": avg_check_size
+        })
+
+    # 2. Аналитика по техническим специалистам
+    tech_query = (
+        select(
+            models.Users.id.label("user_id"),
+            func.coalesce(models.Users.name, models.Users.username).label("user_name"),
+            # Считаем уникальные инспекции
+            func.count(func.distinct(models.DeviceInspection.id)).label("inspections_count"),
+            # Считаем тесты АКБ, связанные с этими инспекциями
+            func.count(func.distinct(models.BatteryTest.id)).label("battery_tests_count")
+        )
+        .outerjoin(models.DeviceInspection, models.Users.id == models.DeviceInspection.user_id)
+        .outerjoin(models.BatteryTest, models.DeviceInspection.id == models.BatteryTest.device_inspection_id)
+        .filter(
+            models.DeviceInspection.inspection_date >= start_date,
+            models.DeviceInspection.inspection_date < end_date_inclusive
+        )
+        .group_by(models.Users.id)
+    )
+    tech_results = await db.execute(tech_query)
+    tech_performance_map = {row.user_id: dict(row._mapping) for row in tech_results}
+
+    # Отдельно считаем упаковки из логов
+    packaging_query = (
+        select(
+            models.PhoneMovementLog.user_id,
+            func.count().label("packaging_count")
+        )
+        .filter(
+            models.PhoneMovementLog.details == "Телефон упакован и готов к приемке на склад.",
+            models.PhoneMovementLog.timestamp >= start_date,
+            models.PhoneMovementLog.timestamp < end_date_inclusive
+        )
+        .group_by(models.PhoneMovementLog.user_id)
+    )
+    packaging_results = await db.execute(packaging_query)
+    for row in packaging_results:
+        if row.user_id in tech_performance_map:
+            tech_performance_map[row.user_id]['packaging_count'] = row.packaging_count
+    
+    technical_performance = [
+        {
+            "user_id": data['user_id'],
+            "user_name": data['user_name'],
+            "inspections_count": data.get('inspections_count', 0),
+            "battery_tests_count": data.get('battery_tests_count', 0),
+            "packaging_count": data.get('packaging_count', 0)
+        }
+        for uid, data in tech_performance_map.items() if data.get('inspections_count', 0) > 0
+    ]
+
+    return {
+        "sales_performance": sorted(sales_performance, key=lambda x: x['total_revenue'], reverse=True),
+        "technical_performance": sorted(technical_performance, key=lambda x: x['inspections_count'], reverse=True)
+    }
+
+async def get_customer_analytics(db: AsyncSession, start_date: date, end_date: date):
+    """Собирает аналитику по источникам трафика за период."""
+    end_date_inclusive = end_date + timedelta(days=1)
+
+    query = (
+        select(
+            models.TrafficSource.id.label("source_id"),
+            models.TrafficSource.name.label("source_name"),
+            func.count(func.distinct(models.Customers.id)).label("client_count"),
+            func.sum(models.Sales.total_amount).label("total_revenue")
+        )
+        .join(models.Customers, models.TrafficSource.id == models.Customers.source_id)
+        .join(models.Sales, models.Customers.id == models.Sales.customer_id)
+        .filter(
+            models.Sales.sale_date >= start_date,
+            models.Sales.sale_date < end_date_inclusive
+        )
+        .group_by(models.TrafficSource.id, models.TrafficSource.name)
+        .order_by(func.sum(models.Sales.total_amount).desc())
+    )
+    
+    result = await db.execute(query)
+    
+    # Отдельно считаем продажи без источника
+    no_source_q = (
+        select(
+            func.count(func.distinct(models.Customers.id)).label("client_count"),
+            func.coalesce(func.sum(models.Sales.total_amount), 0).label("total_revenue")
+        )
+        .join(models.Customers, models.Sales.customer_id == models.Customers.id)
+        .filter(
+            models.Sales.sale_date >= start_date,
+            models.Sales.sale_date < end_date_inclusive,
+            models.Customers.source_id == None
+        )
+    )
+    no_source_res = await db.execute(no_source_q)
+    no_source_data = no_source_res.first()
+
+    sources_performance = [dict(row._mapping) for row in result]
+    
+    if no_source_data and no_source_data.total_revenue > 0:
+        sources_performance.append({
+            "source_id": None,
+            "source_name": "Не указан / Розничный покупатель",
+            "client_count": no_source_data.client_count or 0,
+            "total_revenue": no_source_data.total_revenue or Decimal('0')
+        })
+
+    return {"sources_performance": sources_performance}
+
+# app/crud.py
+
+async def get_inventory_analytics(db: AsyncSession, start_date: date, end_date: date):
+    """Собирает аналитику по складу: залежавшиеся товары и процент брака."""
+    end_date_inclusive = end_date + timedelta(days=1)
+
+    # 1. Анализ залежавшихся товаров (топ-20 самых старых на складе)
+    slow_moving_query = (
+        select(
+            models.Phones.id,
+            models.Phones.serial_number,
+            models.ModelName.name.label("model_name"),
+            models.Phones.purchase_price,
+            # Считаем разницу в днях между сегодня и датой приемки на склад
+            func.extract('epoch', func.now() - func.min(models.PhoneMovementLog.timestamp)) / (60*60*24)
+        )
+        .join(models.PhoneMovementLog, models.Phones.id == models.PhoneMovementLog.phone_id)
+        .join(models.Models, models.Phones.model_id == models.Models.id)
+        .join(models.ModelName, models.Models.model_name_id == models.ModelName.id)
+        .filter(
+            models.Phones.commercial_status == models.CommerceStatus.НА_СКЛАДЕ,
+            models.PhoneMovementLog.event_type == models.PhoneEventType.ПРИНЯТ_НА_СКЛАД
+        )
+        .group_by(models.Phones.id, models.ModelName.name)
+        .order_by(func.min(models.PhoneMovementLog.timestamp).asc())
+        .limit(20)
+    )
+    slow_moving_res = await db.execute(slow_moving_query)
+    slow_moving_stock = [
+        {
+            "phone_id": row.id,
+            "serial_number": row.serial_number,
+            "model_name": row.model_name,
+            "days_in_stock": int(row[4]), # Используем индекс, т.к. у поля нет имени
+            "purchase_price": row.purchase_price
+        } for row in slow_moving_res
+    ]
+
+    # 2. Анализ брака по моделям
+    defect_by_model_query = (
+        select(
+            models.ModelName.name,
+            func.count().label("total_received"),
+            func.sum(case((models.PhoneMovementLog.event_type == models.PhoneEventType.ОБНАРУЖЕН_БРАК, 1), else_=0)).label("defects_count")
+        )
+        .join(models.Models, models.ModelName.id == models.Models.model_name_id)
+        .join(models.Phones, models.Models.id == models.Phones.model_id)
+        .join(models.PhoneMovementLog, models.Phones.id == models.PhoneMovementLog.phone_id)
+        .filter(
+            models.PhoneMovementLog.event_type.in_([
+                models.PhoneEventType.ПОСТУПЛЕНИЕ_ОТ_ПОСТАВЩИКА,
+                models.PhoneEventType.ОБНАРУЖЕН_БРАК
+            ]),
+            models.PhoneMovementLog.timestamp >= start_date,
+            models.PhoneMovementLog.timestamp < end_date_inclusive
+        )
+        .group_by(models.ModelName.name)
+    )
+    defect_by_model_res = await db.execute(defect_by_model_query)
+    defect_by_model = [
+        {
+            "model_name": row.name,
+            "total_received": row.total_received,
+            "defects_count": row.defects_count,
+            "defect_rate": (row.defects_count / row.total_received * 100) if row.total_received > 0 else 0
+        } for row in defect_by_model_res
+    ]
+
+    # 3. Анализ брака по поставщикам
+    defect_by_supplier_query = (
+        select(
+            models.Supplier.name,
+            func.count().label("total_received"),
+            func.sum(case((models.PhoneMovementLog.event_type == models.PhoneEventType.ОБНАРУЖЕН_БРАК, 1), else_=0)).label("defects_count")
+        )
+        .join(models.SupplierOrders, models.Supplier.id == models.SupplierOrders.supplier_id)
+        .join(models.Phones, models.SupplierOrders.id == models.Phones.supplier_order_id)
+        .join(models.PhoneMovementLog, models.Phones.id == models.PhoneMovementLog.phone_id)
+        .filter(
+            models.PhoneMovementLog.event_type.in_([
+                models.PhoneEventType.ПОСТУПЛЕНИЕ_ОТ_ПОСТАВЩИКА,
+                models.PhoneEventType.ОБНАРУЖЕН_БРАК
+            ]),
+            models.PhoneMovementLog.timestamp >= start_date,
+            models.PhoneMovementLog.timestamp < end_date_inclusive
+        )
+        .group_by(models.Supplier.name)
+    )
+    defect_by_supplier_res = await db.execute(defect_by_supplier_query)
+    defect_by_supplier = [
+        {
+            "supplier_name": row.name,
+            "total_received": row.total_received,
+            "defects_count": row.defects_count,
+            "defect_rate": (row.defects_count / row.total_received * 100) if row.total_received > 0 else 0
+        } for row in defect_by_supplier_res
+    ]
+
+    return {
+        "slow_moving_stock": slow_moving_stock,
+        "defect_by_model": sorted(defect_by_model, key=lambda x: x['defect_rate'], reverse=True),
+        "defect_by_supplier": sorted(defect_by_supplier, key=lambda x: x['defect_rate'], reverse=True)
+    }
 

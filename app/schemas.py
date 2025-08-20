@@ -470,7 +470,7 @@ class CashFlow(CashFlowBase):
     operation_category: Optional[OperationCategory] = None
     account: Optional[Account] = None
     counterparty: Optional[Counterparty] = None
-    
+
     class Config:
         from_attributes = True
 
@@ -805,5 +805,55 @@ class FinancialAnalyticsResponse(CustomBaseModel):
     profit_series: List[TimeSeriesDataPoint]
     expense_breakdown: List[ExpenseByCategory]
 
+class EmployeeSalesPerformance(CustomBaseModel):
+    user_id: int
+    user_name: str
+    total_revenue: Decimal
+    phones_sold: int
+    sales_count: int
+    avg_check_size: Decimal
 
+class EmployeeTechnicalPerformance(CustomBaseModel):
+    user_id: int
+    user_name: str
+    inspections_count: int
+    battery_tests_count: int
+    packaging_count: int
+
+class EmployeeAnalyticsResponse(CustomBaseModel):
+    sales_performance: List[EmployeeSalesPerformance]
+    technical_performance: List[EmployeeTechnicalPerformance]
+
+class SourceAnalyticsItem(CustomBaseModel):
+    source_id: Optional[int] = None
+    source_name: str
+    client_count: int
+    total_revenue: Decimal
+
+class CustomerAnalyticsResponse(CustomBaseModel):
+    sources_performance: List[SourceAnalyticsItem]
+
+class SlowMovingStockItem(CustomBaseModel):
+    phone_id: int
+    serial_number: str
+    model_name: str
+    days_in_stock: int
+    purchase_price: Optional[Decimal] = None
+
+class DefectRateByModel(CustomBaseModel):
+    model_name: str
+    total_received: int
+    defects_count: int
+    defect_rate: float
+
+class DefectRateBySupplier(CustomBaseModel):
+    supplier_name: str
+    total_received: int
+    defects_count: int
+    defect_rate: float
+
+class InventoryAnalyticsResponse(CustomBaseModel):
+    slow_moving_stock: List[SlowMovingStockItem]
+    defect_by_model: List[DefectRateByModel]
+    defect_by_supplier: List[DefectRateBySupplier]
 

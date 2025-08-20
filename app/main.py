@@ -2363,7 +2363,7 @@ async def create_new_financial_snapshot(db: AsyncSession = Depends(get_db)):
     """Создает новый финансовый срез на текущую дату."""
     return await crud.create_financial_snapshot(db=db)
 
-WEBHOOK_URL = f"https://39909a43c6bc.ngrok-free.app/api/v1/telegram/webhook/{TELEGRAM_BOT_TOKEN}"
+WEBHOOK_URL = f"https://2a192e6d81b4.ngrok-free.app/api/v1/telegram/webhook/{TELEGRAM_BOT_TOKEN}"
 
 @app.post("/api/v1/telegram/webhook/{token}")
 async def telegram_webhook(token: str, update: dict):
@@ -2450,4 +2450,34 @@ async def read_product_analytics_details(
     """Возвращает детали продаж (чеки) для конкретной модели за период."""
     sales = await crud.get_sales_for_product_analytics_details(db, model_name, start_date, end_date)
     return [await _format_sale_response(sale, db) for sale in sales]
+
+@app.get("/api/v1/analytics/employees", response_model=schemas.EmployeeAnalyticsResponse, tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_employee_analytics(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает аналитику по эффективности сотрудников за период."""
+    return await crud.get_employee_analytics(db=db, start_date=start_date, end_date=end_date)
+
+@app.get("/api/v1/analytics/customers", response_model=schemas.CustomerAnalyticsResponse, tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_customer_analytics(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает аналитику по источникам трафика и клиентам."""
+    return await crud.get_customer_analytics(db=db, start_date=start_date, end_date=end_date)
+
+@app.get("/api/v1/analytics/inventory", response_model=schemas.InventoryAnalyticsResponse, tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_inventory_analytics(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает аналитику по складу."""
+    return await crud.get_inventory_analytics(db=db, start_date=start_date, end_date=end_date)
 

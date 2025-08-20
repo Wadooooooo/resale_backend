@@ -3,6 +3,8 @@ import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram import F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from decimal import Decimal
@@ -22,6 +24,22 @@ TELEGRAM_BOT_TOKEN = "8383336141:AAE3oLDi_fTGDvuT_qnL5Szxm84Hi2cG4uI"
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
+
+admin_keyboard = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="📦 Заказы поставщиков")],
+    [KeyboardButton(text="📈 Аналитика"), KeyboardButton(text="💰 Финансы")],
+], resize_keyboard=True, input_field_placeholder="Выберите действие:")
+
+# Клавиатура для Технического специалиста
+tech_keyboard = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="⚙️ Инспекция")],
+], resize_keyboard=True, input_field_placeholder="Выберите действие:")
+
+# Клавиатура для Продавца
+sales_keyboard = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="📦 Заказы поставщиков"), KeyboardButton(text="📈 Аналитика")],
+    [KeyboardButton(text="💰 Финансы"), KeyboardButton(text="⚙️ Инспекция")]
+], resize_keyboard=True, input_field_placeholder="Выберите действие:")
 
 @dp.message(Command('whoami'))
 async def who_am_i(message: Message):
@@ -47,21 +65,26 @@ class DbUserMiddleware(BaseMiddleware):
     async def __call__(
         self,
         handler: Callable[[types.TelegramObject, Dict[str, Any]], Awaitable[Any]],
-        event: types.Update,  # Указываем, что event - это Update
+        event: types.Update,
         data: Dict[str, Any]
     ) -> Any:
 
-
         from_user = None
-        # Проверяем, есть ли в событии сообщение или нажатие кнопки
         if event.message:
             from_user = event.message.from_user
         elif event.callback_query:
             from_user = event.callback_query.from_user
 
+        # --- НАЧАЛО БЛОКА ДИАГНОСТИКИ ---
+        print("\n--- DEBUG MIDDLEWARE ---")
+        if from_user:
+            print(f"Получено событие от Telegram ID: {from_user.id}") # <-- НОВАЯ СТРОКА
+        else:
+            print("Не удалось извлечь ID пользователя из события.")
+        # --- КОНЕЦ БЛОКА ДИАГНОСТИКИ ---
+
         db_user = None
         if from_user:
-            # Ищем пользователя в БД по его telegram_id
             async with AsyncSessionLocal() as session:
                 stmt = select(models.Users).options(
                     joinedload(models.Users.role)
@@ -71,11 +94,15 @@ class DbUserMiddleware(BaseMiddleware):
                 result = await session.execute(stmt)
                 db_user = result.unique().scalars().first()
 
+        if db_user:
+            print(f"Найден пользователь в БД: {db_user.username}")
+        else:
+            print("Пользователь в БД НЕ НАЙДЕН.")
+        print("--- END DEBUG ---\n")
 
-
-        # Передаем объект пользователя в обработчик
         data['db_user'] = db_user
         return await handler(event, data)
+    
 # Регистрируем Middleware
 dp.update.middleware.register(DbUserMiddleware())
 
@@ -98,13 +125,28 @@ async def cancel_handler(message: Message, state: FSMContext):
 
 # --- ОБРАБОТЧИКИ КОМАНД ---
 @dp.message(CommandStart())
-async def send_welcome(message: Message):
-    """Отправляет приветственное сообщение."""
-    await message.answer(
-        "Привет! Я бот магазина resale.\n"
-        "Чтобы привязать ваш аккаунт, отправьте любое сообщение, "
-        "а затем перешлите его вашему руководителю."
-    )
+async def send_welcome(message: Message, db_user: models.Users):
+    """
+    Отправляет приветствие и показывает клавиатуру в зависимости от роли.
+    """
+    if not db_user:
+        await message.answer(
+            "Привет! Я бот магазина resale.\n"
+            "Чтобы привязать ваш аккаунт, попросите руководителя сделать это для вас."
+        )
+        return
+
+    # Проверяем права и выбираем нужную клавиатуру
+    if user_has_permission(db_user, 'manage_inventory'): # Право есть у Админа/Менеджера
+        await message.answer(f"Добро пожаловать, {db_user.name}! Выберите действие:", reply_markup=admin_keyboard)
+    elif user_has_permission(db_user, 'perform_inspections'): # Право есть у Техника
+        await message.answer(f"Добро пожаловать, {db_user.name}! Выберите действие:", reply_markup=tech_keyboard)
+    elif user_has_permission(db_user, 'perform_sales'):
+        await message.answer(f"Добро пожаловать, {db_user.name}! Выберите действие:", reply_markup=sales_keyboard)
+    else:
+        await message.answer(f"Добро пожаловать, {db_user.name}! У вас нет доступных действий.")
+
+
 
 @dp.message(Command('link'))
 async def link_user_account(message: Message, command: CommandObject, db_user: models.Users):
@@ -148,8 +190,15 @@ async def link_user_account(message: Message, command: CommandObject, db_user: m
 
 
 
-@dp.message(Command('orders'))
-async def list_pending_orders(message: Message):
+@dp.message(F.text == "📦 Заказы поставщиков")
+async def list_pending_orders_handler(message: Message, db_user: models.Users):
+    """Показывает заказы, ожидающие оплаты (реагирует на кнопку)."""
+
+    # Проверяем, что у пользователя есть право просматривать заказы
+    if not user_has_permission(db_user, 'receive_supplier_orders'):
+        await message.answer("⛔ У вас недостаточно прав для просмотра заказов.")
+        return
+    
     """Показывает заказы, ожидающие оплаты."""
     async with AsyncSessionLocal() as session:
         orders = await crud.get_supplier_orders(session)
