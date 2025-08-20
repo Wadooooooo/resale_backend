@@ -813,7 +813,7 @@ async def create_customer(db: AsyncSession, customer: schemas.CustomerCreate):
     db_customer = models.Customers(**customer.model_dump())
     db.add(db_customer)
     await db.commit()
-    await db.refresh(db_customer)
+    await db.refresh(db_customer, attribute_names=['source', 'referrer'])
     return db_customer
 
 async def get_customers(db: AsyncSession):
@@ -1136,7 +1136,8 @@ async def create_cash_flow(db: AsyncSession, cash_flow: schemas.CashFlowCreate, 
     )
     db.add(db_cash_flow)
     await db.commit()
-    await db.refresh(db_cash_flow)
+    # Принудительно загружаем связанные данные перед отправкой ответа
+    await db.refresh(db_cash_flow, attribute_names=['operation_category', 'account', 'counterparty'])
     return db_cash_flow
 
 async def get_cash_flows(db: AsyncSession, skip: int = 0, limit: int = 100):
@@ -1240,6 +1241,21 @@ async def get_accessory_categories(db: AsyncSession):
     """Получает список всех категорий аксессуаров."""
     result = await db.execute(select(models.CategoryAccessories))
     return result.scalars().all()
+
+async def create_accessory_category(db: AsyncSession, category_data: schemas.CategoryAccessoryCreate):
+    """Создает новую категорию для аксессуаров."""
+    # Проверка на дубликат
+    existing_category_result = await db.execute(
+        select(models.CategoryAccessories).filter(models.CategoryAccessories.name == category_data.name)
+    )
+    if existing_category_result.scalars().first():
+        raise HTTPException(status_code=400, detail="Категория с таким названием уже существует.")
+    
+    db_category = models.CategoryAccessories(name=category_data.name)
+    db.add(db_category)
+    await db.commit()
+    await db.refresh(db_category)
+    return db_category
 
 async def link_accessory_to_model(db: AsyncSession, link_data: schemas.AccessoryModelCreate):
     """Создает связь между аксессуаром и базовой моделью телефона."""
@@ -1999,20 +2015,18 @@ async def get_recent_phones_in_stock(db: AsyncSession):
 
 async def get_grouped_phones_in_stock(db: AsyncSession):
     """
-    Получает сгруппированный список моделей телефонов на складе,
-    считая их количество.
+    Gets a grouped list of phone models in stock, counting their quantity and including model numbers.
     """
-    # Шаг 1: Группируем телефоны по model_id и считаем количество
     group_query = (
         select(
             models.Phones.model_id,
-            func.count(models.Phones.id).label("quantity")
+            func.count(models.Phones.id).label("quantity"),
+            func.array_agg(models.ModelNumber.name).label("model_numbers")
         )
-        # VVV ДОБАВЬТЕ ЭТОТ JOIN VVV
         .join(models.Warehouse, (models.Phones.id == models.Warehouse.product_id) & (models.Warehouse.product_type_id == 1))
+        .join(models.ModelNumber, models.Phones.model_number_id == models.ModelNumber.id)
         .where(
             models.Phones.commercial_status == models.CommerceStatus.НА_СКЛАДЕ,
-            # VVV И ЭТОТ ФИЛЬТР VVV
             models.Warehouse.storage_location != models.EnumShop.ПОДМЕННЫЙ_ФОНД,
             models.Phones.model_id.is_not(None)
         )
@@ -2024,10 +2038,8 @@ async def get_grouped_phones_in_stock(db: AsyncSession):
     if not grouped_phones:
         return []
 
-    # Шаг 2: Извлекаем все model_id для следующего запроса
     model_ids = [item.model_id for item in grouped_phones]
     
-    # Шаг 3: Получаем полную информацию для этих моделей
     models_query = (
         select(models.Models)
         .options(
@@ -2041,12 +2053,11 @@ async def get_grouped_phones_in_stock(db: AsyncSession):
     models_result = await db.execute(models_query)
     models_map = {m.id: m for m in models_result.scalars().all()}
     
-    # Шаг 4: Собираем финальный результат
     final_result = []
-    for model_id, quantity in grouped_phones:
+    for model_id, quantity, model_numbers in grouped_phones:
         model_obj = models_map.get(model_id)
         if model_obj:
-            final_result.append({"model": model_obj, "quantity": quantity})
+            final_result.append({"model": model_obj, "quantity": quantity, "model_numbers": model_numbers})
 
     return final_result
 
@@ -2764,11 +2775,13 @@ async def create_deposit_payment(db: AsyncSession, payment_data: schemas.Deposit
     if not deposit:
         raise HTTPException(status_code=404, detail="Вклад не найден")
 
-    # 1. Создаем запись о самом платеже
+    # 1. Создаем запись о самом платеже (как и раньше)
     new_payment = models.DepositPayments(**payment_data.model_dump())
     db.add(new_payment)
 
-    # 2. Создаем запись о расходе в движении денег
+    # 2. НОВОЕ: Создаем запись о расходе в движении денег
+    # Предполагаем, что категория "Оплата по кредитам и займам" имеет ID 33.
+    # Если у вас другой ID, измените его здесь.
     cash_flow = models.CashFlow(
         date=datetime.now(),
         operation_categories_id=33, 
@@ -3671,4 +3684,18 @@ async def mark_notification_as_read(db: AsyncSession, notification_id: int, user
     # Это предотвращает ошибку MissingGreenlet.
     fresh_notification = await db.get(models.Notification, notification_id)
     return fresh_notification
+
+async def create_model_number(db: AsyncSession, model_number_data: schemas.ModelNumberCreate):
+    """Creates a new model number, checking for duplicates first."""
+    existing_model_number = await db.execute(
+        select(models.ModelNumber).filter(models.ModelNumber.name == model_number_data.name)
+    )
+    if existing_model_number.scalars().first():
+        raise HTTPException(status_code=400, detail="A model number with this name already exists.")
+    
+    db_model_number = models.ModelNumber(name=model_number_data.name)
+    db.add(db_model_number)
+    await db.commit()
+    await db.refresh(db_model_number)
+    return db_model_number
 

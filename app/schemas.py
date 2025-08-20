@@ -177,10 +177,10 @@ class GroupedPhoneInStock(BaseModel):
     price: Optional[float] = None
     image_url: Optional[str] = None
     quantity: int
+    model_numbers: List[str] = []
 
     class Config:
         from_attributes = True
-
 
 
 # --- Схемы для Поставщиков ---
@@ -291,6 +291,9 @@ class CategoryAccessory(BaseModel):
     name: Optional[str] = None
     class Config:
         from_attributes = True
+
+class CategoryAccessoryCreate(BaseModel):
+    name: str
 
 class RetailPriceAccessory(BaseModel):
     price: Optional[Decimal] = None
@@ -962,3 +965,5 @@ class Notification(BaseModel):
     class Config:
         from_attributes = True
 
+class ModelNumberCreate(BaseModel):
+    name: str

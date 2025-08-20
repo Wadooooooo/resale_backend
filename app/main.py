@@ -1370,6 +1370,15 @@ async def read_accessory_categories(db: AsyncSession = Depends(get_db), current_
     """Получает список всех категорий аксессуаров."""
     return await crud.get_accessory_categories(db=db)
 
+@app.post("/api/v1/accessory-categories", response_model=schemas.CategoryAccessory, tags=["Accessories"], dependencies=[Depends(security.require_permission("manage_inventory"))])
+async def create_new_accessory_category(
+    category_data: schemas.CategoryAccessoryCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: schemas.User = Depends(security.get_current_active_user)
+):
+    """Создает новую категорию аксессуаров."""
+    return await crud.create_accessory_category(db=db, category_data=category_data)
+
 @app.post("/api/v1/accessories", response_model=schemas.Accessory, tags=["Accessories"], dependencies=[Depends(security.require_permission("manage_inventory"))])
 async def create_new_accessory(
     accessory: schemas.AccessoryCreate,
@@ -1408,6 +1417,9 @@ async def read_all_accessories(
         # --- END OF FIX ---
         
     return response_list
+
+
+
 
 @app.post("/api/v1/customers", response_model=schemas.Customer, tags=["Sales"])
 async def create_new_customer(
@@ -2142,13 +2154,14 @@ async def create_exchange(
 
 @app.get("/api/v1/phones/in-stock", response_model=List[schemas.GroupedPhoneInStock], tags=["Phones"])
 async def read_phones_in_stock(db: AsyncSession = Depends(get_db)):
-    """Получает сгруппированный список телефонов на складе."""
+    """Gets a grouped list of phones in stock."""
     grouped_phones_data = await crud.get_grouped_phones_in_stock(db=db)
     
     response_list = []
     for item in grouped_phones_data:
         phone_model = item["model"]
         quantity = item["quantity"]
+        model_numbers = item["model_numbers"]
 
         model_name_base = phone_model.model_name.name if phone_model.model_name else ""
         storage_display = models.format_storage_for_display(phone_model.storage.storage) if phone_model.storage else ""
@@ -2166,7 +2179,8 @@ async def read_phones_in_stock(db: AsyncSession = Depends(get_db)):
                 full_model_name=full_name,
                 price=latest_price,
                 image_url=phone_model.image_url,
-                quantity=quantity
+                quantity=quantity,
+                model_numbers=model_numbers
             )
         )
     return sorted(response_list, key=lambda x: x.full_model_name)
@@ -2425,7 +2439,7 @@ async def create_new_financial_snapshot(db: AsyncSession = Depends(get_db)):
     """Создает новый финансовый срез на текущую дату."""
     return await crud.create_financial_snapshot(db=db)
 
-WEBHOOK_URL = f"https://2a192e6d81b4.ngrok-free.app/api/v1/telegram/webhook/{TELEGRAM_BOT_TOKEN}"
+WEBHOOK_URL = f"https://dfbe5d48baba.ngrok-free.app/api/v1/telegram/webhook/{TELEGRAM_BOT_TOKEN}"
 
 @app.post("/api/v1/telegram/webhook/{token}")
 async def telegram_webhook(token: str, update: dict):
@@ -2647,3 +2661,11 @@ async def mark_notification_read(
     """Отмечает уведомление как прочитанное."""
     return await crud.mark_notification_as_read(db, notification_id, current_user.id)
 
+
+@app.post("/api/v1/model-numbers", response_model=schemas.ModelNumber, tags=["Inspections"], dependencies=[Depends(security.require_permission("perform_inspections"))])
+async def create_new_model_number(
+    model_number_data: schemas.ModelNumberCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    """Creates a new model number."""
+    return await crud.create_model_number(db=db, model_number_data=model_number_data)
