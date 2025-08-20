@@ -198,7 +198,11 @@ class Phones(Base):
     supplier_order: Mapped[Optional["SupplierOrders"]] = relationship("SupplierOrders", back_populates="phones")
     model_number: Mapped[Optional["ModelNumber"]] = relationship("ModelNumber", back_populates="phones")
     device_inspections: Mapped[List["DeviceInspection"]] = relationship("DeviceInspection", back_populates="phone")
-    movement_logs: Mapped[List["PhoneMovementLog"]] = relationship("PhoneMovementLog", back_populates="phone")
+    movement_logs: Mapped[List["PhoneMovementLog"]] = relationship(
+        "PhoneMovementLog", 
+        back_populates="phone",
+        order_by="PhoneMovementLog.timestamp.desc()"  # <-- ДОБАВЬТЕ ЭТУ СТРОКУ
+    )
     repairs: Mapped[List["Repairs"]] = relationship("Repairs", back_populates="phone")
 
 

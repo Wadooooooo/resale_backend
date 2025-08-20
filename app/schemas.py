@@ -37,6 +37,12 @@ from decimal import Decimal
 class CustomBaseModel(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
+class ProductAnalyticsItem(CustomBaseModel):
+    model_name: str
+    units_sold: int
+    total_revenue: Decimal
+    total_profit: Decimal
+    
 # --- Схемы для токена ---
 class Token(BaseModel):
     access_token: str

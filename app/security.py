@@ -1,7 +1,6 @@
 # app/security.py
 
 import os
-from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -15,7 +14,7 @@ from sqlalchemy.orm import selectinload
 from . import crud, schemas, models
 from .database import get_db
 
-load_dotenv()
+
 
 # --- Настройки безопасности ---
 
