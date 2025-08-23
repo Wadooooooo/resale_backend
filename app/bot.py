@@ -1,5 +1,7 @@
 # app/bot.py
 import os
+from dotenv import load_dotenv
+load_dotenv()
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -20,7 +22,7 @@ from .database import AsyncSessionLocal
 
 # --- НАСТРОЙКИ ---
 # Замените на ваш токен или лучше загрузите из переменных окружения
-TELEGRAM_BOT_TOKEN = "8383336141:AAE3oLDi_fTGDvuT_qnL5Szxm84Hi2cG4uI" 
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()

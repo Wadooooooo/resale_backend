@@ -44,7 +44,7 @@ class ProductAnalyticsItem(CustomBaseModel):
     total_profit: Decimal
     
 # --- Схемы для токена ---
-class Token(BaseModel):
+class Token(CustomBaseModel):
     access_token: str
     refresh_token: str
     token_type: str
@@ -74,7 +74,7 @@ class RoleSchema(BaseModel):
 
 
 # --- Схемы для пользователя ---
-class UserBase(BaseModel):
+class UserBase(CustomBaseModel):
     username: str
     email: Optional[str] = None
     name: Optional[str] = None
