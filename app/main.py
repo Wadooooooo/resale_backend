@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 
 # Загружаем переменные окружения в самом начале
 load_dotenv()
-
 from . import security
 
 from fastapi.exceptions import RequestValidationError
