@@ -1750,65 +1750,42 @@ async def get_replacement_options(db: AsyncSession, original_phone_model_id: int
     result = await db.execute(query)
     return result.scalars().all()
 
-async def process_phone_exchange(db: AsyncSession, original_phone_id: int, replacement_phone_id: int, user_id: int):
-    """Обрабатывает обмен и создает логи для обоих телефонов."""
-    # Загружаем телефоны сразу с их моделями для проверки
+async def process_phone_exchange(db: AsyncSession, original_phone_id: int, replacement_phone_id: int, user_id: int) -> int:
+    """Обрабатывает обмен, обновляет записи в БД и возвращает ID продажи."""
     original_phone = await db.get(models.Phones, original_phone_id, options=[selectinload(models.Phones.model)])
     replacement_phone = await db.get(models.Phones, replacement_phone_id, options=[selectinload(models.Phones.model)])
 
-    # Проверки на существование и статусы
     if not original_phone or original_phone.commercial_status != models.CommerceStatus.ПРОДАН:
         raise HTTPException(status_code=400, detail="Исходный телефон не найден или не был продан.")
     if not replacement_phone or replacement_phone.commercial_status != models.CommerceStatus.НА_СКЛАДЕ:
         raise HTTPException(status_code=400, detail="Телефон для замены не найден на складе.")
-    
-    # --- НОВАЯ ГИБКАЯ ПРОВЕРКА МОДЕЛЕЙ ---
+
     if (not original_phone.model or not replacement_phone.model or
             original_phone.model.model_name_id != replacement_phone.model.model_name_id or
             original_phone.model.storage_id != replacement_phone.model.storage_id):
         raise HTTPException(status_code=400, detail="Обмен возможен только на ту же модель и объем памяти.")
-    # --- КОНЕЦ НОВОЙ ПРОВЕРКИ ---
 
-    # ... (остальная часть функции остается без изменений)
-    
-    orig_wh_res = await db.execute(
-        select(models.Warehouse)
-        .filter_by(product_id=original_phone.id, product_type_id=1)
-        .order_by(models.Warehouse.id.desc())
-        )
+    orig_wh_res = await db.execute(select(models.Warehouse).filter_by(product_id=original_phone.id, product_type_id=1).order_by(models.Warehouse.id.desc()))
     original_warehouse_entry = orig_wh_res.scalars().first()
-        
-    repl_wh_res = await db.execute(
-        select(models.Warehouse)
-        .filter_by(product_id=replacement_phone.id, product_type_id=1)
-        .order_by(models.Warehouse.id.desc())
-        )
+
+    repl_wh_res = await db.execute(select(models.Warehouse).filter_by(product_id=replacement_phone.id, product_type_id=1).order_by(models.Warehouse.id.desc()))
     replacement_warehouse_entry = repl_wh_res.scalars().first()
 
     if not original_warehouse_entry or not replacement_warehouse_entry:
         raise HTTPException(status_code=404, detail="Не найдена складская запись для одного из телефонов.")
 
-    sale_detail_res = await db.execute(
-        select(models.SaleDetails).filter_by(warehouse_id=original_warehouse_entry.id)
-        )
+    sale_detail_res = await db.execute(select(models.SaleDetails).filter_by(warehouse_id=original_warehouse_entry.id))
     sale_detail = sale_detail_res.scalars().one()
-    
-    log_original = models.PhoneMovementLog(
-        phone_id=original_phone.id,
-        user_id=user_id,
-        event_type=models.PhoneEventType.ОБМЕНЕН,
-        details=f"Обменян (возвращен клиентом) в рамках продажи №{sale_detail.sale_id}. Заменен на S/N: {replacement_phone.serial_number}."
-    )
+
+    # Запоминаем ID продажи перед коммитом
+    sale_id_to_return = sale_detail.sale_id
+
+    log_original = models.PhoneMovementLog(phone_id=original_phone.id, user_id=user_id, event_type=models.PhoneEventType.ОБМЕНЕН, details=f"Обменян (возвращен клиентом) в рамках продажи №{sale_detail.sale_id}. Заменен на S/N: {replacement_phone.serial_number}.")
     db.add(log_original)
 
-    log_replacement = models.PhoneMovementLog(
-        phone_id=replacement_phone.id,
-        user_id=user_id,
-        event_type=models.PhoneEventType.ОБМЕНЕН,
-        details=f"Обменян (выдан клиенту) в рамках продажи №{sale_detail.sale_id}. Заменил S/N: {original_phone.serial_number}."
-    )
+    log_replacement = models.PhoneMovementLog(phone_id=replacement_phone.id, user_id=user_id, event_type=models.PhoneEventType.ОБМЕНЕН, details=f"Обменян (выдан клиенту) в рамках продажи №{sale_detail.sale_id}. Заменил S/N: {original_phone.serial_number}.")
     db.add(log_replacement)
-    
+
     original_phone.commercial_status = models.CommerceStatus.ВОЗВРАТ
     original_phone.technical_status = models.TechStatus.БРАК
     original_warehouse_entry.quantity += 1
@@ -1823,8 +1800,7 @@ async def process_phone_exchange(db: AsyncSession, original_phone_id: int, repla
 
     await db.commit()
 
-    return await get_phone_by_id_fully_loaded(db, original_phone_id)
-
+    return sale_id_to_return
 
 async def process_supplier_replacement(
     db: AsyncSession, 
@@ -2423,7 +2399,7 @@ async def get_payroll_report(db: AsyncSession, start_date: date, end_date: date)
     users_result = await db.execute(
         select(models.Users).options(selectinload(models.Users.role))
         .join(models.Users.role)
-        .filter(models.Roles.role_name.in_(['Продавец', 'Тех. специалист', 'Администратор']))
+        .filter(models.Roles.role_name.in_(['Продавец', 'Технический специалист', 'Администратор']))
     )
     users = users_result.scalars().all()
 
@@ -3698,4 +3674,17 @@ async def create_model_number(db: AsyncSession, model_number_data: schemas.Model
     await db.commit()
     await db.refresh(db_model_number)
     return db_model_number
+
+async def get_sale_by_id(db: AsyncSession, sale_id: int) -> Optional[models.Sales]:
+    """Получает одну продажу по ее ID со всеми связанными данными."""
+    result = await db.execute(
+        select(models.Sales)
+        .options(
+            selectinload(models.Sales.customer),
+            selectinload(models.Sales.sale_details).selectinload(models.SaleDetails.warehouse),
+            selectinload(models.Sales.payments).selectinload(models.SalePayments.account)
+        )
+        .filter(models.Sales.id == sale_id)
+    )
+    return result.scalars().one_or_none()
 

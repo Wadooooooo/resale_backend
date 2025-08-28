@@ -124,15 +124,21 @@ async def read_checklist_items(
 
     return await crud.get_checklist_items(db=db)
 
-@app.post("/api/v1/phones/{phone_id}/initial-inspections", response_model=schemas.Phone, tags=["Inspections"], dependencies=[Depends(security.require_permission("perform_inspections"))])
-async def create_initial_inspection_endpoint(
+@app.post("/api/v1/phones/{phone_id}/exchange", response_model=dict, tags=["Returns"])
+async def create_exchange(
     phone_id: int,
-    inspection_data: schemas.InspectionSubmission,
+    exchange_data: schemas.ExchangeRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: schemas.User = Depends(security.get_current_active_user)
+    current_user: models.Users = Depends(security.get_current_active_user)
 ):
-    updated_phone = await crud.create_initial_inspection(db=db, phone_id=phone_id, inspection_data=inspection_data, user_id=current_user.id)
-    return _format_phone_response(updated_phone)
+    """Выполняет обмен телефона и возвращает ID оригинальной продажи."""
+    sale_id = await crud.process_phone_exchange(
+        db=db,
+        original_phone_id=phone_id,
+        replacement_phone_id=exchange_data.replacement_phone_id,
+        user_id=current_user.id
+    )
+    return {"sale_id": sale_id}
 
 
 @app.put("/api/v1/inspections/{inspection_id}/battery-test", response_model=schemas.Phone, tags=["Inspections"], dependencies=[Depends(security.require_permission("perform_inspections"))])
@@ -2445,47 +2451,47 @@ async def create_new_financial_snapshot(db: AsyncSession = Depends(get_db)):
     """Создает новый финансовый срез на текущую дату."""
     return await crud.create_financial_snapshot(db=db)
 
-WEBHOOK_URL = f"https://{SERVER_DOMAIN}/api/v1/telegram/webhook/{TELEGRAM_BOT_TOKEN}"
+# WEBHOOK_URL = f"https://{SERVER_DOMAIN}/api/v1/telegram/webhook/{TELEGRAM_BOT_TOKEN}"
 
-@app.post("/api/v1/telegram/webhook/{token}")
-async def telegram_webhook(token: str, update: dict):
-    """Принимает обновления от Telegram."""
-    if token != TELEGRAM_BOT_TOKEN:
-        raise HTTPException(status_code=403, detail="Invalid token")
+# @app.post("/api/v1/telegram/webhook/{token}")
+# async def telegram_webhook(token: str, update: dict):
+#     """Принимает обновления от Telegram."""
+#     if token != TELEGRAM_BOT_TOKEN:
+#         raise HTTPException(status_code=403, detail="Invalid token")
 
-    telegram_update = types.Update(**update)
-    await dp.feed_update(bot=bot, update=telegram_update)
-    return {"ok": True}
+#     telegram_update = types.Update(**update)
+#     await dp.feed_update(bot=bot, update=telegram_update)
+#     return {"ok": True}
 
-# Создаем экземпляр планировщика
-scheduler = AsyncIOScheduler(timezone="Asia/Yekaterinburg") # Укажите ваш часовой пояс
+# # Создаем экземпляр планировщика
+# scheduler = AsyncIOScheduler(timezone="Asia/Yekaterinburg") # Укажите ваш часовой пояс
 
-# Добавляем нашу задачу в планировщик
-scheduler.add_job(close_overdue_shifts, 'cron', hour=23, minute=59)
+# # Добавляем нашу задачу в планировщик
+# scheduler.add_job(close_overdue_shifts, 'cron', hour=23, minute=59)
 
-@app.on_event("startup")
-async def startup_event():
-    """Запускает планировщик и устанавливает вебхук при старте приложения."""
-    # Устанавливаем вебхук
-    webhook_info = await bot.get_webhook_info()
-    if webhook_info.url != WEBHOOK_URL:
-        await bot.set_webhook(url=WEBHOOK_URL)
-        print(">>> Вебхук для Telegram бота УСТАНОВЛЕН.")
-    else:
-        # ДОБАВЛЕН ЭТОТ БЛОК ДЛЯ ИНФОРМАТИВНОСТИ
-        print(">>> Вебхук для Telegram бота УЖЕ БЫЛ УСТАНОВЛЕН.")
+# @app.on_event("startup")
+# async def startup_event():
+#     """Запускает планировщик и устанавливает вебхук при старте приложения."""
+#     # Устанавливаем вебхук
+#     webhook_info = await bot.get_webhook_info()
+#     if webhook_info.url != WEBHOOK_URL:
+#         await bot.set_webhook(url=WEBHOOK_URL)
+#         print(">>> Вебхук для Telegram бота УСТАНОВЛЕН.")
+#     else:
+#         # ДОБАВЛЕН ЭТОТ БЛОК ДЛЯ ИНФОРМАТИВНОСТИ
+#         print(">>> Вебхук для Telegram бота УЖЕ БЫЛ УСТАНОВЛЕН.")
     
-    scheduler.start()
-    print("Планировщик задач запущен.")
+#     scheduler.start()
+#     print("Планировщик задач запущен.")
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Останавливает планировщик и удаляет вебхук при выключении приложения."""
-    await bot.delete_webhook()
-    print("Вебхук для Telegram бота удален.")
+# @app.on_event("shutdown")
+# async def shutdown_event():
+#     """Останавливает планировщик и удаляет вебхук при выключении приложения."""
+#     await bot.delete_webhook()
+#     print("Вебхук для Telegram бота удален.")
 
-    scheduler.shutdown()
-    print("Планировщик задач остановлен.")
+#     scheduler.shutdown()
+#     print("Планировщик задач остановлен.")
 
 
 @app.get("/api/v1/analytics/products", response_model=List[schemas.ProductAnalyticsItem], tags=["Analytics"],
@@ -2676,3 +2682,15 @@ async def create_new_model_number(
 ):
     """Creates a new model number."""
     return await crud.create_model_number(db=db, model_number_data=model_number_data)
+
+@app.get("/api/v1/sales/{sale_id}", response_model=schemas.SaleResponse, tags=["Sales"],
+         dependencies=[Depends(security.require_permission("perform_sales"))])
+async def read_sale_by_id(sale_id: int, db: AsyncSession = Depends(get_db)):
+    """Получает детали конкретной продажи по ее ID."""
+    sale = await crud.get_sale_by_id(db=db, sale_id=sale_id)
+    if not sale:
+        raise HTTPException(status_code=404, detail="Продажа не найдена")
+    
+    # Используем существующий форматер для ответа
+    return await _format_sale_response(sale, db)
+
