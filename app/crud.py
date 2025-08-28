@@ -438,24 +438,34 @@ async def get_phone_by_id_fully_loaded(db: AsyncSession, phone_id: int):
         raise HTTPException(status_code=404, detail="Телефон не найден")
     return phone
 
-async def get_phones(db: Session, skip: int = 0, limit: int = 1000):
-    """Получает список телефонов с вложенными данными о модели."""
+async def get_phones(db: AsyncSession, skip: int = 0, limit: int = 100):
+    """Получает список телефонов с пагинацией и общим количеством."""
+    # Запрос для получения общего количества
+    total_stmt = select(func.count(models.Phones.id))
+    total_result = await db.execute(total_stmt)
+    total = total_result.scalar_one()
+
+    # Запрос для получения самих записей с учетом пагинации
     query = (
         select(models.Phones)
         .options(
-            selectinload(models.Phones.model)
-            .selectinload(models.Models.model_name),
-            selectinload(models.Phones.model)
-            .selectinload(models.Models.storage),
-            selectinload(models.Phones.model)
-            .selectinload(models.Models.color),
+            # Эта часть загружает все, что нужно для форматирования
+            selectinload(models.Phones.model).options(
+                selectinload(models.Models.model_name),
+                selectinload(models.Models.storage),
+                selectinload(models.Models.color)
+            ),
+            selectinload(models.Phones.model_number),    # <-- ВОТ ЭТА СТРОКА ДОБАВЛЕНА
+            selectinload(models.Phones.supplier_order) # <-- И ЭТА ТОЖЕ ДОБАВЛЕНА
         )
         .order_by(models.Phones.id.desc())
         .offset(skip)
         .limit(limit)
     )
     result = await db.execute(query)
-    return result.scalars().all()
+    items = result.scalars().all()
+
+    return {"items": items, "total": total}
 
 # --- Функции для Поставщиков ---
 
@@ -670,6 +680,7 @@ async def receive_supplier_order(db: AsyncSession, order_id: int, user_id: int):
                     purchase_price=detail.price,
                     technical_status=models.TechStatus.ОЖИДАЕТ_ПРОВЕРКУ,
                     commercial_status=models.CommerceStatus.НЕ_ГОТОВ_К_ПРОДАЖЕ,
+                    condition=models.PhoneCondition.REFURBISHED,
                     added_date=datetime.now()
                 )
                 new_phones.append(new_phone)
@@ -1140,10 +1151,22 @@ async def create_cash_flow(db: AsyncSession, cash_flow: schemas.CashFlowCreate, 
     await db.refresh(db_cash_flow, attribute_names=['operation_category', 'account', 'counterparty'])
     return db_cash_flow
 
-async def get_cash_flows(db: AsyncSession, skip: int = 0, limit: int = 100):
-    """Получает список всех денежных операций."""
-    result = await db.execute(
-        select(models.CashFlow)
+async def get_cash_flows(db: AsyncSession, skip: int = 0, limit: int = 100, account_id: Optional[int] = None):
+    """Получает список всех денежных операций с пагинацией и фильтрацией по счету."""
+    
+    # Базовый запрос, к которому будем добавлять условия
+    base_query = select(models.CashFlow)
+    if account_id:
+        base_query = base_query.where(models.CashFlow.account_id == account_id)
+
+    # Запрос для получения общего количества с учетом фильтра
+    total_stmt = select(func.count()).select_from(base_query.subquery())
+    total_result = await db.execute(total_stmt)
+    total = total_result.scalar_one()
+
+    # Запрос для получения самих записей
+    items_query = (
+        base_query
         .options(
             selectinload(models.CashFlow.operation_category),
             selectinload(models.CashFlow.account),
@@ -1153,7 +1176,10 @@ async def get_cash_flows(db: AsyncSession, skip: int = 0, limit: int = 100):
         .offset(skip)
         .limit(limit)
     )
-    return result.scalars().all()
+    result = await db.execute(items_query)
+    items = result.scalars().all()
+
+    return {"items": items, "total": total}
 
 async def create_account(db: AsyncSession, account: schemas.AccountCreate):
     """Создает новый счет."""

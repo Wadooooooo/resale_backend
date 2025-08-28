@@ -154,6 +154,7 @@ class Phone(BaseModel):
     serial_number: Optional[str] = None
     technical_status: Optional[str]
     commercial_status: Optional[str]
+    condition: Optional[str] = None
     model: Optional[ModelDetail] = None
     added_date: Optional[date] = None
     model_number: Optional[ModelNumber] = None
@@ -166,6 +167,7 @@ class PhoneCreate(BaseModel):
     model_id: int
     technical_status: Optional[TechStatus] = None
     commercial_status: Optional[CommerceStatus] = None
+    condition: Optional[str] = "Восстановленный" 
 
 class PhoneInStock(BaseModel):
     id: int
@@ -355,6 +357,7 @@ class ProductForSale(BaseModel):
     name: str
     price: Optional[Decimal] = None
     serial_number: Optional[str] = None # Только для телефонов
+    condition: Optional[str] = None 
     quantity: int
 
     # Cхема для одной позиции в чеке при создании
@@ -395,6 +398,7 @@ class SaleCreate(BaseModel):
 
 class SaleDetailResponse(BaseModel):
     id: int
+    warehouse_id: int   
     product_name: str
     serial_number: Optional[str] = None   # <--- ДОБАВИТЬ
     model_number: Optional[str] = None    # <--- ДОБАВИТЬ
@@ -973,3 +977,12 @@ class Notification(BaseModel):
 
 class ModelNumberCreate(BaseModel):
     name: str
+
+class PaginatedPhonesResponse(BaseModel):
+    items: List[Phone]
+    total: int
+
+class PaginatedCashFlowResponse(BaseModel):
+    items: List[CashFlow]
+    total: int
+

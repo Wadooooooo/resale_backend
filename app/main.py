@@ -124,21 +124,15 @@ async def read_checklist_items(
 
     return await crud.get_checklist_items(db=db)
 
-@app.post("/api/v1/phones/{phone_id}/exchange", response_model=dict, tags=["Returns"])
-async def create_exchange(
+@app.post("/api/v1/phones/{phone_id}/initial-inspections", response_model=schemas.Phone, tags=["Inspections"], dependencies=[Depends(security.require_permission("perform_inspections"))])
+async def create_initial_inspection_endpoint(
     phone_id: int,
-    exchange_data: schemas.ExchangeRequest,
+    inspection_data: schemas.InspectionSubmission,
     db: AsyncSession = Depends(get_db),
-    current_user: models.Users = Depends(security.get_current_active_user)
+    current_user: schemas.User = Depends(security.get_current_active_user)
 ):
-    """Выполняет обмен телефона и возвращает ID оригинальной продажи."""
-    sale_id = await crud.process_phone_exchange(
-        db=db,
-        original_phone_id=phone_id,
-        replacement_phone_id=exchange_data.replacement_phone_id,
-        user_id=current_user.id
-    )
-    return {"sale_id": sale_id}
+    updated_phone = await crud.create_initial_inspection(db=db, phone_id=phone_id, inspection_data=inspection_data, user_id=current_user.id)
+    return _format_phone_response(updated_phone)
 
 
 @app.put("/api/v1/inspections/{inspection_id}/battery-test", response_model=schemas.Phone, tags=["Inspections"], dependencies=[Depends(security.require_permission("perform_inspections"))])
@@ -276,6 +270,7 @@ def _format_phone_response(phone: models.Phones) -> schemas.Phone:
         serial_number=phone.serial_number,
         technical_status=phone.technical_status.value if phone.technical_status else None,
         commercial_status=phone.commercial_status.value if phone.commercial_status else None,
+        condition=phone.condition.value if phone.condition else None,
         model_id=phone.model_id,
         model_number_id=phone.model_number_id,
         supplier_order_id=phone.supplier_order_id,
@@ -346,7 +341,7 @@ async def _format_sale_response(sale: models.Sales, db: AsyncSession) -> schemas
 
         response_details.append(
             schemas.SaleDetailResponse(
-                id=detail.id, product_name=product_name, serial_number=serial_number,
+                id=detail.id, warehouse_id=detail.warehouse.id if detail.warehouse else -1, product_name=product_name, serial_number=serial_number,
                 model_number=model_number, quantity=detail.quantity, unit_price=detail.unit_price
             )
         )
@@ -447,7 +442,7 @@ async def read_my_sales(
 
             response_details.append(
                 schemas.SaleDetailResponse(
-                    id=detail.id, product_name=product_name, serial_number=serial_number,
+                    id=detail.id, warehouse_id=detail.warehouse.id if detail.warehouse else -1, product_name=product_name, serial_number=serial_number,
                     model_number=model_number, quantity=detail.quantity, unit_price=detail.unit_price
                 )
             )
@@ -473,16 +468,18 @@ async def create_new_cash_flow(
     return await crud.create_cash_flow(db=db, cash_flow=cash_flow_data, user_id=current_user.id)
 
 @app.get("/api/v1/cashflow", 
-         response_model=List[schemas.CashFlow], 
+         response_model=schemas.PaginatedCashFlowResponse, 
          tags=["Cash Flow"],
          dependencies=[Depends(security.require_permission("manage_cashflow"))])
 async def read_cash_flows(
     skip: int = 0,
     limit: int = 100,
+    account_id: Optional[int] = None, # Добавляем фильтр
     db: AsyncSession = Depends(get_db),
     current_user: schemas.User = Depends(security.get_current_active_user)
 ):
-    return await crud.get_cash_flows(db=db, skip=skip, limit=limit)
+    cash_flows_data = await crud.get_cash_flows(db=db, skip=skip, limit=limit, account_id=account_id)
+    return {"items": cash_flows_data["items"], "total": cash_flows_data["total"]}
 
 @app.post("/api/v1/cashflow/accounts", response_model=schemas.Account, tags=["Cash Flow"],
           dependencies=[Depends(security.require_permission("manage_cashflow"))])
@@ -839,7 +836,7 @@ async def read_accessories_in_stock(db: AsyncSession = Depends(get_db)):
 # --- Эндпоинт для получения списка телефонов ---
 
 # MODIFY: Обновляем read_phones, чтобы он тоже явно формировал ModelDetail
-@app.get("/api/v1/phones", response_model=List[schemas.Phone], tags=["Phones"])
+@app.get("/api/v1/phones", response_model=schemas.PaginatedPhonesResponse, tags=["Phones"])
 async def read_phones(
     skip: int = 0,
     limit: int = 100,
@@ -847,65 +844,14 @@ async def read_phones(
     current_user: schemas.User = Depends(security.get_current_active_user),
 ):
     """
-    Получает список всех телефонов.
-    Доступно только для авторизованных пользователей.
+    Получает список всех телефонов с пагинацией.
     """
-    phones = await crud.get_phones(db=db, skip=skip, limit=limit)
+    phones_data = await crud.get_phones(db=db, skip=skip, limit=limit)
     
-    formatted_phones_for_response = []
-    for phone in phones:
-        phone_dict = phone.__dict__.copy() 
-        
-        if phone.technical_status:
-            phone_dict["technical_status"] = models.format_enum_value_for_display(phone.technical_status.value)
-        else:
-            phone_dict["technical_status"] = None
-
-        if phone.commercial_status:
-            phone_dict["commercial_status"] = models.format_enum_value_for_display(phone.commercial_status.value)
-        else:
-            phone_dict["commercial_status"] = None
-
-        if phone.model: # Убедимся, что phone.model существует
-            model_obj = phone.model
-            
-            model_id = model_obj.id
-            model_name_base_id = model_obj.model_name.id if model_obj.model_name else None
-            model_name_base_name = model_obj.model_name.name if model_obj.model_name and model_obj.model_name.name else "Без названия"
-            
-            storage_id = model_obj.storage.id if model_obj.storage and model_obj.storage.id is not None else None
-            storage_value = model_obj.storage.storage if model_obj.storage and model_obj.storage.storage is not None else None
-            
-            color_id = model_obj.color.id if model_obj.color and model_obj.color.id is not None else None
-            color_name = model_obj.color.color_name if model_obj.color and model_obj.color.color_name else None
-
-            formatted_storage_display = models.format_storage_for_display(storage_value)
-            
-            full_model_display_name_parts = [model_name_base_name]
-            if formatted_storage_display:
-                full_model_display_name_parts.append(formatted_storage_display)
-            if color_name:
-                full_model_display_name_parts.append(color_name)
-            
-            full_model_display_name = " ".join(full_model_display_name_parts).strip()
-
-            phone_dict['model'] = schemas.ModelDetail(
-                id=model_id, 
-                name=full_model_display_name, 
-                base_name=model_name_base_name, # <--- ИСПРАВЛЕНО: Присваиваем базовое название
-                model_name_id=model_name_base_id, 
-                storage_id=storage_id, 
-                color_id=color_id
-            )
-        else:
-            phone_dict['model'] = None 
-
-        if 'added_date' not in phone_dict and hasattr(phone, 'added_date'):
-             phone_dict['added_date'] = phone.added_date
-
-        formatted_phones_for_response.append(schemas.Phone.model_validate(phone_dict))
+    # Используем вашу существующую логику форматирования
+    formatted_phones = [_format_phone_response(p) for p in phones_data["items"]]
     
-    return formatted_phones_for_response
+    return {"items": formatted_phones, "total": phones_data["total"]}
 
 
 
@@ -1504,10 +1450,12 @@ async def read_products_for_sale(db: AsyncSession = Depends(get_db), current_use
         price = None
         serial_number = None
         product_type = "Неизвестно"
+        condition = None
 
         if isinstance(product_obj, models.Phones):
             product_type = "Телефон"
             serial_number = product_obj.serial_number
+            condition = product_obj.condition.value if product_obj.condition else None 
             if product_obj.model:
                 model_name_base = product_obj.model.model_name.name if product_obj.model.model_name else ""
                 storage_display = models.format_storage_for_display(product_obj.model.storage.storage) if product_obj.model.storage else ""
@@ -1521,6 +1469,7 @@ async def read_products_for_sale(db: AsyncSession = Depends(get_db), current_use
         elif isinstance(product_obj, models.Accessories):
             product_type = "Аксессуар"
             name = product_obj.name
+            condition = None
             if product_obj.retail_price_accessories:
                 latest_price_entry = sorted(product_obj.retail_price_accessories, key=lambda p: p.date, reverse=True)[0]
                 price = latest_price_entry.price
@@ -1535,6 +1484,7 @@ async def read_products_for_sale(db: AsyncSession = Depends(get_db), current_use
                 name=name,
                 price=price,
                 serial_number=serial_number,
+                condition=condition,
                 quantity=item.quantity
             )
         )
@@ -1622,6 +1572,7 @@ async def create_new_sale(
         response_details.append(
             schemas.SaleDetailResponse(
                 id=detail.id,
+                warehouse_id=detail.warehouse.id if detail.warehouse else -1,
                 product_name=product_name,
                 serial_number=serial_number,
                 model_number=model_number,
@@ -1674,6 +1625,18 @@ async def finalize_payment_endpoint(
     # 4. Возвращаем готовый ответ.
     return response
 
+# app/main.py
+
+@app.get("/api/v1/sales/{sale_id}", response_model=schemas.SaleResponse, tags=["Sales"],
+         dependencies=[Depends(security.require_permission("perform_sales"))])
+async def read_sale_by_id(sale_id: int, db: AsyncSession = Depends(get_db)):
+    """Получает детали конкретной продажи по ее ID."""
+    sale = await crud.get_sale_by_id(db=db, sale_id=sale_id)
+    if not sale:
+        raise HTTPException(status_code=404, detail="Продажа не найдена")
+    
+    # Используем существующий форматер для ответа
+    return await _format_sale_response(sale, db)
 
 @app.post("/api/v1/accessories/{accessory_id}/prices", response_model=schemas.RetailPriceResponse, tags=["Pricing"]
           ,dependencies=[Depends(security.require_permission("manage_pricing"))])
@@ -2126,43 +2089,21 @@ async def get_replacement_phones(phone_id: int, db: AsyncSession = Depends(get_d
 
 
 
-@app.post("/api/v1/phones/{phone_id}/exchange", response_model=schemas.Phone, tags=["Returns"])
+@app.post("/api/v1/phones/{phone_id}/exchange", response_model=dict, tags=["Returns"])
 async def create_exchange(
     phone_id: int,
     exchange_data: schemas.ExchangeRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: models.Users = Depends(security.get_current_active_user) # Added for consistency
+    current_user: models.Users = Depends(security.get_current_active_user)
 ):
-    """Выполняет обмен телефона."""
-    updated_phone = await crud.process_phone_exchange(
+    """Выполняет обмен телефона и возвращает ID оригинальной продажи."""
+    sale_id = await crud.process_phone_exchange(
         db=db,
         original_phone_id=phone_id,
         replacement_phone_id=exchange_data.replacement_phone_id,
         user_id=current_user.id
     )
-
-    # --- ADD THIS FORMATTING BLOCK ---
-    phone_dict = updated_phone.__dict__
-    if updated_phone.model:
-        model_name_base = updated_phone.model.model_name.name if updated_phone.model.model_name else ""
-        storage_display = models.format_storage_for_display(updated_phone.model.storage.storage) if updated_phone.model.storage else ""
-        color_name = updated_phone.model.color.color_name if updated_phone.model.color else ""
-        full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
-        phone_dict['model'] = schemas.ModelDetail(
-            id=updated_phone.model.id,
-            name=full_display_name,
-            base_name=model_name_base,
-            model_name_id=updated_phone.model.model_name_id,
-            storage_id=updated_phone.model.storage_id,
-            color_id=updated_phone.model.color_id
-        )
-    
-    if 'technical_status' in phone_dict and hasattr(phone_dict['technical_status'], 'value'):
-        phone_dict['technical_status'] = phone_dict['technical_status'].value
-    if 'commercial_status' in phone_dict and hasattr(phone_dict['commercial_status'], 'value'):
-        phone_dict['commercial_status'] = phone_dict['commercial_status'].value
-    
-    return schemas.Phone.model_validate(phone_dict, from_attributes=True)
+    return {"sale_id": sale_id}
 
 @app.get("/api/v1/phones/in-stock", response_model=List[schemas.GroupedPhoneInStock], tags=["Phones"])
 async def read_phones_in_stock(db: AsyncSession = Depends(get_db)):
@@ -2463,11 +2404,11 @@ async def create_new_financial_snapshot(db: AsyncSession = Depends(get_db)):
 #     await dp.feed_update(bot=bot, update=telegram_update)
 #     return {"ok": True}
 
-# # Создаем экземпляр планировщика
-# scheduler = AsyncIOScheduler(timezone="Asia/Yekaterinburg") # Укажите ваш часовой пояс
+# Создаем экземпляр планировщика
+scheduler = AsyncIOScheduler(timezone="Asia/Yekaterinburg") # Укажите ваш часовой пояс
 
-# # Добавляем нашу задачу в планировщик
-# scheduler.add_job(close_overdue_shifts, 'cron', hour=23, minute=59)
+# Добавляем нашу задачу в планировщик
+scheduler.add_job(close_overdue_shifts, 'cron', hour=23, minute=59)
 
 # @app.on_event("startup")
 # async def startup_event():
@@ -2682,15 +2623,3 @@ async def create_new_model_number(
 ):
     """Creates a new model number."""
     return await crud.create_model_number(db=db, model_number_data=model_number_data)
-
-@app.get("/api/v1/sales/{sale_id}", response_model=schemas.SaleResponse, tags=["Sales"],
-         dependencies=[Depends(security.require_permission("perform_sales"))])
-async def read_sale_by_id(sale_id: int, db: AsyncSession = Depends(get_db)):
-    """Получает детали конкретной продажи по ее ID."""
-    sale = await crud.get_sale_by_id(db=db, sale_id=sale_id)
-    if not sale:
-        raise HTTPException(status_code=404, detail="Продажа не найдена")
-    
-    # Используем существующий форматер для ответа
-    return await _format_sale_response(sale, db)
-

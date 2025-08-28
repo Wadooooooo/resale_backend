@@ -4,6 +4,7 @@ from enum import Enum as PyEnum
 from typing import List, Optional, Union
 from sqlalchemy.dialects.postgresql import JSONB
 
+import sqlalchemy as sa
 from sqlalchemy import (
     Boolean, Date, DateTime, ForeignKey, Integer, 
     Interval, Numeric, String, Text, TIMESTAMP, Enum, BigInteger
@@ -93,6 +94,11 @@ class PhoneEventType(PyEnum):
 class RepairType(PyEnum):
     ГАРАНТИЙНЫЙ = "ГАРАНТИЙНЫЙ"
     ПЛАТНЫЙ = "ПЛАТНЫЙ"
+
+class PhoneCondition(str, PyEnum):
+    NEW = "Новый"
+    USED = "Б/У"
+    REFURBISHED = "Восстановленный"
 
 
 # Model definitions
@@ -192,6 +198,12 @@ class Phones(Base):
     purchase_price: Mapped[Optional[Decimal]] = mapped_column(Numeric, nullable=True)
     technical_status: Mapped[Optional[TechStatus]] = mapped_column(Enum(TechStatus, native_enum=False)) # <-- ИЗМЕНЕНИЕ
     commercial_status: Mapped[Optional[CommerceStatus]] = mapped_column(Enum(CommerceStatus, native_enum=False)) # <-- ИЗМЕНЕНИЕ
+    condition: Mapped[PhoneCondition] = mapped_column(
+        sa.Enum(PhoneCondition, name='phonecondition', values_callable=lambda obj: [e.value for e in obj]),
+        nullable=False,
+        server_default=PhoneCondition.REFURBISHED.value
+    )
+    
     added_date: Mapped[Optional[date]] = mapped_column(Date)
     
     model: Mapped[Optional["Models"]] = relationship("Models", back_populates="phones")
