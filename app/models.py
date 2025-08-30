@@ -199,7 +199,12 @@ class Phones(Base):
     technical_status: Mapped[Optional[TechStatus]] = mapped_column(Enum(TechStatus, native_enum=False)) # <-- ИЗМЕНЕНИЕ
     commercial_status: Mapped[Optional[CommerceStatus]] = mapped_column(Enum(CommerceStatus, native_enum=False)) # <-- ИЗМЕНЕНИЕ
     condition: Mapped[PhoneCondition] = mapped_column(
-        sa.Enum(PhoneCondition, name='phonecondition', values_callable=lambda obj: [e.value for e in obj]),
+        sa.Enum(
+            PhoneCondition,
+            values_callable=lambda obj: [e.value for e in obj], # <-- ДОБАВЬТЕ ЭТУ СТРОКУ
+            native_enum=False, 
+            length=20
+        ),
         nullable=False,
         server_default=PhoneCondition.REFURBISHED.value
     )

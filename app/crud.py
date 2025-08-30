@@ -681,7 +681,7 @@ async def receive_supplier_order(db: AsyncSession, order_id: int, user_id: int):
                     technical_status=models.TechStatus.ОЖИДАЕТ_ПРОВЕРКУ,
                     commercial_status=models.CommerceStatus.НЕ_ГОТОВ_К_ПРОДАЖЕ,
                     condition=models.PhoneCondition.REFURBISHED,
-                    added_date=datetime.now()
+                    added_date=datetime.now().date()
                 )
                 new_phones.append(new_phone)
         elif detail.accessory_id:

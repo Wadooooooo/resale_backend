@@ -1,5 +1,6 @@
 # app/bot.py
 import os
+import logging
 from dotenv import load_dotenv
 load_dotenv()
 from aiogram import Bot, Dispatcher, types
@@ -14,6 +15,7 @@ from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy import select
 from typing import Callable, Dict, Any, Awaitable
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
+
 
 from . import crud, schemas, models
 from .database import AsyncSessionLocal
@@ -359,14 +361,14 @@ async def on_startup(app: web.Application):
     current_webhook_info = await bot.get_webhook_info()
     if current_webhook_info.url != webhook_url:
         await bot.set_webhook(url=webhook_url)
-        print(f">>> Вебхук для Telegram бота УСТАНОВЛЕН на URL: {webhook_url}")
+        logging.info(f">>> Вебхук для Telegram бота УСТАНОВЛЕН на URL: {webhook_url}")
     else:
-        print(">>> Вебхук для Telegram бота УЖЕ БЫЛ УСТАНОВЛЕН.")
+        logging.info(">>> Вебхук для Telegram бота УЖЕ БЫЛ УСТАНОВЛЕН.")
 
 async def on_shutdown(app: web.Application):
     """Действия при остановке: удаление вебхука."""
     await bot.delete_webhook()
-    print(">>> Вебхук для Telegram бота удален.")
+    logging.info(">>> Вебхук для Telegram бота удален.")
 
 async def main():
     """Основная функция для запуска бота."""
@@ -384,7 +386,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, host=os.getenv("BOT_SERVER_HOST", "0.0.0.0"), port=int(os.getenv("BOT_SERVER_PORT", 8081)))
     await site.start()
-    print(f"Бот запущен и слушает порт {os.getenv('BOT_SERVER_PORT', 8081)}...")
+    logging.info(f"Бот запущен и слушает порт {os.getenv('BOT_SERVER_PORT', 8081)}...")
     
     # Бесконечный цикл, чтобы скрипт не завершался
     await asyncio.Event().wait()

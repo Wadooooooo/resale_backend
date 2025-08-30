@@ -39,6 +39,11 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 app = FastAPI(title="resale shop API")
 
+@app.get("/health", status_code=status.HTTP_200_OK, tags=["Health Check"])
+async def health_check():
+    """Простой эндпоинт для healthcheck."""
+    return {"status": "ok"}
+
 origins = [
     "http://localhost:5173",
     "http://localhost:5174" # Адрес вашего React-приложения
