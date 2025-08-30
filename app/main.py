@@ -23,8 +23,6 @@ from sqlalchemy import select, update
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from .database import AsyncSessionLocal
 from .models import format_enum_value_for_display
-from aiogram import types
-from .bot import bot, dp, TELEGRAM_BOT_TOKEN
 
 # Удалить этот импорт, так как используется AsyncSession
 # from sqlalchemy.orm import Session 

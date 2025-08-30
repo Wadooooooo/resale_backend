@@ -335,3 +335,63 @@ async def process_account_selected(callback_query: types.CallbackQuery, state: F
     finally:
         await state.clear()
         await callback_query.answer()
+
+## # # # # # # # # # # 
+import asyncio
+from aiohttp import web
+
+# Этот обработчик будет принимать входящие запросы от Telegram
+async def webhook_handler(request: web.Request) -> web.Response:
+    """Принимает обновления от Telegram и передает их в диспетчер."""
+    # Извлекаем токен из URL, чтобы убедиться, что запрос пришел по правильному адресу
+    # Это дополнительная мера безопасности
+    if request.match_info.get("token") != TELEGRAM_BOT_TOKEN:
+        return web.Response(status=403, text="Forbidden")
+
+    # Получаем JSON из тела запроса и передаем в aiogram
+    update_data = await request.json()
+    await dp.feed_update(bot=bot, update=types.Update(**update_data))
+    return web.Response(status=200, text="OK")
+
+async def on_startup(app: web.Application):
+    """Действия при старте приложения бота: установка вебхука."""
+    webhook_url = f"{os.getenv('WEBHOOK_HOST')}/api/v1/telegram/webhook/{TELEGRAM_BOT_TOKEN}"
+    current_webhook_info = await bot.get_webhook_info()
+    if current_webhook_info.url != webhook_url:
+        await bot.set_webhook(url=webhook_url)
+        print(f">>> Вебхук для Telegram бота УСТАНОВЛЕН на URL: {webhook_url}")
+    else:
+        print(">>> Вебхук для Telegram бота УЖЕ БЫЛ УСТАНОВЛЕН.")
+
+async def on_shutdown(app: web.Application):
+    """Действия при остановке: удаление вебхука."""
+    await bot.delete_webhook()
+    print(">>> Вебхук для Telegram бота удален.")
+
+async def main():
+    """Основная функция для запуска бота."""
+    # Создаем приложение aiohttp
+    app = web.Application()
+    # Регистрируем обработчик вебхука
+    app.router.add_post("/api/v1/telegram/webhook/{token}", webhook_handler)
+    # Добавляем функции на старт и остановку
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+
+    # Запускаем веб-сервер для бота
+    # Важно: используйте переменные окружения для хоста и порта
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host=os.getenv("BOT_SERVER_HOST", "0.0.0.0"), port=int(os.getenv("BOT_SERVER_PORT", 8081)))
+    await site.start()
+    print(f"Бот запущен и слушает порт {os.getenv('BOT_SERVER_PORT', 8081)}...")
+    
+    # Бесконечный цикл, чтобы скрипт не завершался
+    await asyncio.Event().wait()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("Бот остановлен.")
