@@ -761,6 +761,7 @@ class FinancialSnapshotSchema(BaseModel):
     cash_balance: Decimal
     inventory_value: Decimal
     goods_in_transit_value: Decimal
+    goods_sent_to_customer_value: Decimal = Decimal('0')
     total_assets: Decimal
     details: Optional[Dict[str, Any]] = None 
 
@@ -985,4 +986,27 @@ class PaginatedPhonesResponse(BaseModel):
 class PaginatedCashFlowResponse(BaseModel):
     items: List[CashFlow]
     total: int
+
+class DividendCalculation(BaseModel):
+    id: int
+    calculation_date: datetime
+    total_profit: Decimal
+    reinvestment_amount: Decimal
+    dividends_amount: Decimal
+    owner_dividends: Optional[Dict[str, float]] = None
+
+    class Config:
+        from_attributes = True
+
+class AssetHistoryPoint(BaseModel):
+    date: date
+    value: Decimal
+
+class CapitalStructure(BaseModel):
+    company_equity: Decimal
+    total_liabilities: Decimal
+
+class CompanyHealthResponse(BaseModel):
+    asset_history: List[AssetHistoryPoint]
+    capital_structure: CapitalStructure
 

@@ -5,7 +5,7 @@ from sqlalchemy.future import select
 from . import models
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, joinedload, aliased
-from sqlalchemy import func, select, case, or_
+from sqlalchemy import func, select, case, or_, desc
 from . import models, schemas
 from datetime import date
 from fastapi import HTTPException, status
@@ -934,7 +934,8 @@ async def create_sale(db: AsyncSession, sale_data: schemas.SaleCreate, user_id: 
             ))
             db.add(models.CashFlow(
                 date=datetime.now(), operation_categories_id=2, account_id=payment.account_id,
-                amount=payment.amount, description=f"Поступление от продажи №{new_sale.id}", currency_id=1
+                amount=payment.amount, description=f"Поступление от продажи №{new_sale.id}", currency_id=1,
+                user_id=user_id
             ))
 
         if sale_data.cash_received and sale_data.cash_received > 0:
@@ -977,7 +978,10 @@ async def create_sale(db: AsyncSession, sale_data: schemas.SaleCreate, user_id: 
         if warehouse_item.product_type_id == 1: # Телефон
             phone = await db.get(models.Phones, warehouse_item.product_id)
             if phone:
-                phone.commercial_status = models.CommerceStatus.ПРОДАН
+                if sale_data.delivery_method:
+                    phone.commercial_status = models.CommerceStatus.ОТПРАВЛЕН_КЛИЕНТУ
+                else:
+                    phone.commercial_status = models.CommerceStatus.ПРОДАН
                 customer_name = "Розничный покупатель"
                 if new_sale.customer_id:
                     customer = await db.get(models.Customers, new_sale.customer_id)
@@ -1579,7 +1583,8 @@ async def process_customer_refund(db: AsyncSession, phone_id: int, refund_data: 
         account_id=refund_data.account_id,
         amount=-refund_amount,
         description=f"Возврат средств за телефон S/N: {phone.serial_number}. Продажа ID: {sale_detail.sale_id}. {refund_data.notes or ''}".strip(),
-        currency_id=1
+        currency_id=1,
+        user_id=user_id
     )
     db.add(cash_flow_entry)
 
@@ -1951,47 +1956,55 @@ async def delete_user(db: AsyncSession, user_id: int):
     return user_to_delete
 
 async def get_sales_summary_for_user(db: AsyncSession, user_id: int):
-    """Собирает сводку по продажам для пользователя за активную смену."""
+    """Собирает сводку по продажам для пользователя за активную смену на основе движения денег."""
     
     # 1. Находим активную смену
     active_shift = await get_active_shift(db, user_id)
     if not active_shift:
-        # Если смена не начата, возвращаем нули
-        return {"sales_count": 0, "total_revenue": 0, "cash_in_register": 0}
+        return {"sales_count": 0, "total_revenue": Decimal('0'), "cash_in_register": Decimal('0')}
 
-    # 2. Определяем временной диапазон активной смены
     shift_start_time = active_shift.shift_start
-    shift_end_time = datetime.now() # Считаем до текущего момента
+    shift_end_time = datetime.now()
 
-    # 3. Считаем количество продаж и общую выручку за смену
-    sales_query = (
-        select(
-            func.count(models.Sales.id),
-            func.sum(models.Sales.total_amount)
+    # 2. Считаем количество продаж (этот показатель не меняется)
+    sales_count_res = await db.execute(
+        select(func.count(models.Sales.id))
+        .filter(models.Sales.user_id == user_id, models.Sales.sale_date.between(shift_start_time, shift_end_time))
+    )
+    sales_count = sales_count_res.scalar_one_or_none() or 0
+
+    # 3. Находим ID категорий "Продажа" и "Возврат"
+    op_cat_res = await db.execute(
+        select(models.OperationCategories.id, models.OperationCategories.name)
+        .where(models.OperationCategories.name.in_(['Поступление от продажи/услуг', 'Возврат']))
+    )
+    op_cat_map = {r.name: r.id for r in op_cat_res.all()}
+    
+    # 4. Считаем общую выручку (сумма продаж минус сумма возвратов)
+    revenue_query = select(func.coalesce(func.sum(models.CashFlow.amount), Decimal('0'))).where(
+        models.CashFlow.user_id == user_id,
+        models.CashFlow.date.between(shift_start_time, shift_end_time),
+        models.CashFlow.operation_categories_id.in_(list(op_cat_map.values()))
+    )
+    total_revenue = (await db.execute(revenue_query)).scalar_one()
+
+    # 5. Считаем наличные в кассе (все приходы и расходы по счету "Наличные")
+    cash_account_res = await db.execute(select(models.Accounts.id).where(models.Accounts.name == 'Наличные'))
+    cash_account_id = cash_account_res.scalar_one_or_none()
+    
+    cash_in_register = Decimal('0')
+    if cash_account_id:
+        cash_query = select(func.coalesce(func.sum(models.CashFlow.amount), Decimal('0'))).where(
+            models.CashFlow.user_id == user_id,
+            models.CashFlow.date.between(shift_start_time, shift_end_time),
+            models.CashFlow.account_id == cash_account_id
         )
-        .filter(models.Sales.user_id == user_id)
-        .filter(models.Sales.sale_date >= shift_start_time)
-        .filter(models.Sales.sale_date <= shift_end_time)
-    )
-    sales_result = await db.execute(sales_query)
-    sales_count, total_revenue = sales_result.one()
-
-    # 4. Считаем сумму НАЛИЧНЫХ платежей за смену из новой таблицы
-    cash_query = (
-        select(func.sum(models.SalePayments.amount))
-        .join(models.Sales)
-        .filter(models.Sales.user_id == user_id)
-        .filter(models.SalePayments.payment_method == models.EnumPayment.НАЛИЧНЫЕ)
-        .filter(models.Sales.sale_date >= shift_start_time)
-        .filter(models.Sales.sale_date <= shift_end_time)
-    )
-    cash_result = await db.execute(cash_query)
-    cash_revenue = cash_result.scalar_one()
+        cash_in_register = (await db.execute(cash_query)).scalar_one()
 
     return {
-        "sales_count": sales_count or 0,
-        "total_revenue": total_revenue or 0,
-        "cash_in_register": cash_revenue or 0
+        "sales_count": sales_count,
+        "total_revenue": total_revenue,
+        "cash_in_register": cash_in_register
     }
 
 async def get_recent_phones_in_stock(db: AsyncSession):
@@ -2587,7 +2600,9 @@ async def create_financial_snapshot(db: AsyncSession):
         .where(models.Phones.commercial_status.not_in([
             models.CommerceStatus.ПРОДАН,
             models.CommerceStatus.СПИСАН_ПОСТАВЩИКОМ,
-            models.CommerceStatus.В_РЕМОНТЕ
+            models.CommerceStatus.В_РЕМОНТЕ,
+            models.CommerceStatus.ОТПРАВЛЕН_КЛИЕНТУ,    # <--- ДОБАВЛЕНО
+            models.CommerceStatus.ВЫДАН_КАК_ПОДМЕННЫЙ
         ]))
     )
     inventory_phones = inventory_phones_res.all()
@@ -2613,23 +2628,71 @@ async def create_financial_snapshot(db: AsyncSession):
         transit_details_grouped[g.id] += float(g.price * g.quantity)
     transit_details = [{"order_id": order_id, "value": value} for order_id, value in transit_details_grouped.items()]
 
-    # 4. Считаем общую стоимость активов
-    total_assets = Decimal(cash_balance) + inventory_value + goods_in_transit_value
+    # 4. НОВЫЙ БЛОК: Считаем стоимость товаров, отправленных клиенту
+    sent_to_customer_res = await db.execute(
+        select(models.Phones.id, models.Phones.serial_number, models.Phones.purchase_price)
+        .where(models.Phones.commercial_status == models.CommerceStatus.ОТПРАВЛЕН_КЛИЕНТУ)
+    )
+    sent_to_customer_phones = sent_to_customer_res.all()
+    goods_sent_to_customer_value = sum(p.purchase_price or 0 for p in sent_to_customer_phones)
+    sent_to_customer_details = [{"id": p.id, "sn": p.serial_number, "price": float(p.purchase_price or 0)} for p in sent_to_customer_phones]
 
-    # 5. Создаем и сохраняем срез с НОВОЙ детализацией
+    # 5. Обновляем расчет общих активов
+    total_assets = Decimal(cash_balance) + inventory_value + goods_in_transit_value + goods_sent_to_customer_value
+
+    # 6. Создаем и сохраняем срез с новыми данными
     new_snapshot = models.FinancialSnapshot(
         snapshot_date=datetime.now(),
         cash_balance=cash_balance,
         inventory_value=inventory_value,
         goods_in_transit_value=goods_in_transit_value,
+        goods_sent_to_customer_value=goods_sent_to_customer_value, # <--- ДОБАВЛЕНО
         total_assets=total_assets,
         details={
             "inventory": inventory_details,
             "goods_in_transit": transit_details,
-            "cash_by_account": cash_by_account_details  # <-- Добавляем новую информацию
+            "goods_sent_to_customer": sent_to_customer_details, # <--- ДОБАВЛЕНО
+            "cash_by_account": cash_by_account_details
         }
     )
     db.add(new_snapshot)
+    await db.flush() # Используем flush, чтобы получить ID для new_snapshot
+
+    # --- НАЧАЛО НОВОЙ ЛОГИКИ РАСЧЕТА ДИВИДЕНДОВ ---
+    
+    # Ищем предыдущий финансовый срез
+    previous_snapshot_result = await db.execute(
+        select(models.FinancialSnapshot)
+        .filter(models.FinancialSnapshot.id != new_snapshot.id) # Исключаем только что созданный
+        .order_by(desc(models.FinancialSnapshot.snapshot_date))
+        .limit(1)
+    )
+    previous_snapshot = previous_snapshot_result.scalars().first()
+
+    if previous_snapshot:
+        # Считаем чистую прибыль как разницу в активах
+        total_profit = new_snapshot.total_assets - previous_snapshot.total_assets
+        
+        # Расчет производим, только если есть прибыль
+        if total_profit > 0:
+            reinvestment_amount = total_profit * Decimal('0.5')
+            dividends_amount = total_profit * Decimal('0.5')
+            
+            # Распределяем дивиденды 50/50 между двумя собственниками
+            owner_dividends_details = {
+                "owner_1_share": float(dividends_amount / 2),
+                "owner_2_share": float(dividends_amount / 2)
+            }
+
+            new_calculation = models.DividendCalculations(
+                start_snapshot_id=previous_snapshot.id,
+                end_snapshot_id=new_snapshot.id,
+                total_profit=total_profit,
+                reinvestment_amount=reinvestment_amount,
+                dividends_amount=dividends_amount,
+                owner_dividends=owner_dividends_details
+            )
+            db.add(new_calculation)
     await db.commit()
     await db.refresh(new_snapshot)
     
@@ -3713,4 +3776,42 @@ async def get_sale_by_id(db: AsyncSession, sale_id: int) -> Optional[models.Sale
         .filter(models.Sales.id == sale_id)
     )
     return result.scalars().one_or_none()
+
+async def get_dividend_calculations(db: AsyncSession) -> List[models.DividendCalculations]:
+    """Получает историю всех расчетов по дивидендам."""
+    result = await db.execute(
+        select(models.DividendCalculations).order_by(desc(models.DividendCalculations.calculation_date))
+    )
+    return result.scalars().all()
+
+async def get_company_health_analytics(db: AsyncSession):
+    """Собирает данные для отчета о состоянии компании."""
+    # 1. Получаем историю роста общих активов из всех срезов
+    snapshots_res = await db.execute(
+        select(models.FinancialSnapshot.snapshot_date, models.FinancialSnapshot.total_assets)
+        .order_by(models.FinancialSnapshot.snapshot_date.asc())
+    )
+    snapshots = snapshots_res.all()
+    asset_history = [{"date": s.snapshot_date.date(), "value": s.total_assets} for s in snapshots]
+
+    # 2. Берем последнюю известную сумму активов
+    latest_total_assets = snapshots[-1].total_assets if snapshots else Decimal('0')
+
+    # 3. Считаем общую сумму обязательств (долги по вкладам)
+    today = date.today()
+    deposits_details = await get_all_deposits_details(db=db, target_date=today)
+    total_liabilities = sum(d.remaining_debt for d in deposits_details)
+
+    # 4. Считаем собственный капитал (Активы - Обязательства)
+    company_equity = latest_total_assets - total_liabilities
+    
+    capital_structure = {
+        "company_equity": company_equity,
+        "total_liabilities": total_liabilities
+    }
+
+    return {
+        "asset_history": asset_history,
+        "capital_structure": capital_structure
+    }
 

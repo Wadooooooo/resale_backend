@@ -208,7 +208,7 @@ async def list_pending_orders_handler(message: Message, db_user: models.Users):
         orders = await crud.get_supplier_orders(session)
         pending_orders = [
             o for o in orders 
-            if o.status.value == 'ПОЛУЧЕН' and o.delivery_payment_status.value != 'ОПЛАЧЕН'
+            if o.status.value in ['ЗАКАЗ', 'ПОЛУЧЕН'] and o.delivery_payment_status.value != 'ОПЛАЧЕН'
         ]
 
         if not pending_orders:

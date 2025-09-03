@@ -1628,7 +1628,13 @@ async def finalize_payment_endpoint(
     # 4. Возвращаем готовый ответ.
     return response
 
-# app/main.py
+@app.get("/api/v1/sales/by-date", response_model=List[schemas.SaleResponse], tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_sales_by_date(target_date: date, db: AsyncSession = Depends(get_db)):
+    """Возвращает все продажи за указанный день."""
+    sales = await crud.get_sales_by_date(db=db, target_date=target_date)
+    # Используем вашу существующую функцию для форматирования ответа
+    return [await _format_sale_response(sale, db) for sale in sales]
 
 @app.get("/api/v1/sales/{sale_id}", response_model=schemas.SaleResponse, tags=["Sales"],
          dependencies=[Depends(security.require_permission("perform_sales"))])
@@ -2458,13 +2464,7 @@ async def read_financial_analytics(
     """Возвращает данные для построения финансовых графиков."""
     return await crud.get_financial_analytics(db=db, start_date=start_date, end_date=end_date)
 
-@app.get("/api/v1/sales/by-date", response_model=List[schemas.SaleResponse], tags=["Analytics"],
-         dependencies=[Depends(security.require_permission("view_reports"))])
-async def read_sales_by_date(target_date: date, db: AsyncSession = Depends(get_db)):
-    """Возвращает все продажи за указанный день."""
-    sales = await crud.get_sales_by_date(db=db, target_date=target_date)
-    # Используем вашу существующую функцию для форматирования ответа
-    return [await _format_sale_response(sale, db) for sale in sales]
+
 
 @app.get("/api/v1/cashflow/by-date", response_model=List[schemas.CashFlow], tags=["Analytics"],
          dependencies=[Depends(security.require_permission("view_reports"))])
@@ -2572,6 +2572,21 @@ async def read_cash_flow_forecast(
 ):
     """Возвращает прогноз движения денежных средств."""
     return await crud.get_cash_flow_forecast(db=db, forecast_days=forecast_days)
+
+@app.get("/api/v1/reports/dividends",
+         response_model=List[schemas.DividendCalculation],
+         tags=["Reports"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_dividend_calculations(db: AsyncSession = Depends(get_db)):
+    """Получает историю расчетов по дивидендам."""
+    return await crud.get_dividend_calculations(db=db)
+
+@app.get("/api/v1/analytics/company-health", response_model=schemas.CompanyHealthResponse, tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_company_health_analytics(db: AsyncSession = Depends(get_db)):
+    """Возвращает аналитику по общему состоянию компании."""
+    return await crud.get_company_health_analytics(db=db)
+
 
 @app.post("/api/v1/waiting-list", response_model=schemas.WaitingListCreateResponse, tags=["Waiting List"],
           dependencies=[Depends(security.require_permission("perform_sales"))])

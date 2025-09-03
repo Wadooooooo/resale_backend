@@ -584,6 +584,8 @@ class CashFlow(Base):
     amount: Mapped[Optional[Decimal]] = mapped_column(Numeric)
     currency_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("currency.id"))
     description: Mapped[Optional[str]] = mapped_column(Text)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    user: Mapped[Optional["Users"]] = relationship("Users")
     
     # Relationships
     operation_category: Mapped[Optional["OperationCategories"]] = relationship("OperationCategories", back_populates="cash_flows")
@@ -905,6 +907,7 @@ class FinancialSnapshot(Base):
     cash_balance: Mapped[Decimal] = mapped_column(Numeric, default=0)
     inventory_value: Mapped[Decimal] = mapped_column(Numeric, default=0)
     goods_in_transit_value: Mapped[Decimal] = mapped_column(Numeric, default=0)
+    goods_sent_to_customer_value: Mapped[Decimal] = mapped_column(Numeric, default=0, server_default=sa.text('0'))
     total_assets: Mapped[Decimal] = mapped_column(Numeric, default=0)
     
     details: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True) # Для хранения деталей расчета
@@ -975,4 +978,22 @@ class Notification(Base):
 
     user: Mapped["Users"] = relationship("Users")
     waiting_list_entry: Mapped[Optional["WaitingList"]] = relationship("WaitingList")
+
+class DividendCalculations(Base):
+    __tablename__ = "dividend_calculations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    calculation_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    
+    start_snapshot_id: Mapped[int] = mapped_column(Integer, ForeignKey("financial_snapshots.id"))
+    end_snapshot_id: Mapped[int] = mapped_column(Integer, ForeignKey("financial_snapshots.id"))
+
+    total_profit: Mapped[Decimal] = mapped_column(Numeric, default=0)
+    reinvestment_amount: Mapped[Decimal] = mapped_column(Numeric, default=0)
+    dividends_amount: Mapped[Decimal] = mapped_column(Numeric, default=0)
+    owner_dividends: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+
+    # Связи для удобного доступа к срезам
+    start_snapshot: Mapped["FinancialSnapshot"] = relationship("FinancialSnapshot", foreign_keys=[start_snapshot_id])
+    end_snapshot: Mapped["FinancialSnapshot"] = relationship("FinancialSnapshot", foreign_keys=[end_snapshot_id])
 
