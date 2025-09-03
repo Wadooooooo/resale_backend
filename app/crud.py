@@ -3785,24 +3785,35 @@ async def get_dividend_calculations(db: AsyncSession) -> List[models.DividendCal
     return result.scalars().all()
 
 async def get_company_health_analytics(db: AsyncSession):
-    """Собирает данные для отчета о состоянии компании."""
-    # 1. Получаем историю роста общих активов из всех срезов
+    """Собирает данные для отчета о состоянии компании, включая разбивку активов."""
+    
+    # 1. Получаем все финансовые срезы целиком, сортируя по дате
     snapshots_res = await db.execute(
-        select(models.FinancialSnapshot.snapshot_date, models.FinancialSnapshot.total_assets)
-        .order_by(models.FinancialSnapshot.snapshot_date.asc())
+        select(models.FinancialSnapshot).order_by(models.FinancialSnapshot.snapshot_date.asc())
     )
-    snapshots = snapshots_res.all()
+    snapshots = snapshots_res.scalars().all()
+
+    # Если срезов нет, возвращаем пустые данные
+    if not snapshots:
+        return {
+            "asset_history": [],
+            "capital_structure": {"company_equity": 0, "total_liabilities": 0},
+            "asset_composition": {"cash_balance": 0, "inventory_value": 0, "goods_in_transit_value": 0, "goods_sent_to_customer_value": 0}
+        }
+
+    # 2. Готовим данные для графика роста активов
     asset_history = [{"date": s.snapshot_date.date(), "value": s.total_assets} for s in snapshots]
 
-    # 2. Берем последнюю известную сумму активов
-    latest_total_assets = snapshots[-1].total_assets if snapshots else Decimal('0')
+    # 3. Берем самый последний срез для расчета текущей структуры
+    latest_snapshot = snapshots[-1]
+    latest_total_assets = latest_snapshot.total_assets
 
-    # 3. Считаем общую сумму обязательств (долги по вкладам)
+    # 4. Считаем обязательства (этот блок без изменений)
     today = date.today()
     deposits_details = await get_all_deposits_details(db=db, target_date=today)
     total_liabilities = sum(d.remaining_debt for d in deposits_details)
 
-    # 4. Считаем собственный капитал (Активы - Обязательства)
+    # 5. Считаем собственный капитал (этот блок без изменений)
     company_equity = latest_total_assets - total_liabilities
     
     capital_structure = {
@@ -3810,8 +3821,18 @@ async def get_company_health_analytics(db: AsyncSession):
         "total_liabilities": total_liabilities
     }
 
+    # 6. НОВЫЙ БЛОК: Готовим данные для диаграммы состава активов
+    asset_composition_data = {
+        "cash_balance": latest_snapshot.cash_balance,
+        "inventory_value": latest_snapshot.inventory_value,
+        "goods_in_transit_value": latest_snapshot.goods_in_transit_value,
+        "goods_sent_to_customer_value": latest_snapshot.goods_sent_to_customer_value,
+    }
+
+    # 7. Возвращаем все три блока данных
     return {
         "asset_history": asset_history,
-        "capital_structure": capital_structure
+        "capital_structure": capital_structure,
+        "asset_composition": asset_composition_data
     }
 

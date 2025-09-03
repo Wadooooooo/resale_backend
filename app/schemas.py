@@ -998,6 +998,11 @@ class DividendCalculation(BaseModel):
     class Config:
         from_attributes = True
 
+class AssetComposition(BaseModel):
+    cash_balance: Decimal
+    inventory_value: Decimal
+    goods_in_transit_value: Decimal
+    goods_sent_to_customer_value: Decimal
 class AssetHistoryPoint(BaseModel):
     date: date
     value: Decimal
@@ -1009,4 +1014,4 @@ class CapitalStructure(BaseModel):
 class CompanyHealthResponse(BaseModel):
     asset_history: List[AssetHistoryPoint]
     capital_structure: CapitalStructure
-
+    asset_composition: AssetComposition
