@@ -1142,17 +1142,26 @@ async def get_accounts(db: AsyncSession):
     result = await db.execute(select(models.Accounts))
     return result.scalars().all()
 
-async def create_cash_flow(db: AsyncSession, cash_flow: schemas.CashFlowCreate, user_id: int):
-    """Создает новую запись о движении денежных средств."""
+async def create_cash_flow(db: AsyncSession, cash_flow: schemas.CashFlowCreate, user_id: int, commit: bool = True):
+    """
+    Создает новую запись о движении денежных средств.
+    Может либо сразу коммитить транзакцию (по умолчанию), либо просто добавлять в сессию.
+    """
     db_cash_flow = models.CashFlow(
         **cash_flow.model_dump(),
         date=datetime.now(),
-        currency_id=1
+        currency_id=1,
+        user_id=user_id
     )
     db.add(db_cash_flow)
-    await db.commit()
-    # Принудительно загружаем связанные данные перед отправкой ответа
-    await db.refresh(db_cash_flow, attribute_names=['operation_category', 'account', 'counterparty'])
+    
+    if commit:
+        await db.commit()
+        await db.refresh(db_cash_flow, attribute_names=['operation_category', 'account', 'counterparty'])
+    else:
+        await db.flush()
+        await db.refresh(db_cash_flow, attribute_names=['operation_category', 'account', 'counterparty'])
+        
     return db_cash_flow
 
 async def get_cash_flows(db: AsyncSession, skip: int = 0, limit: int = 100, account_id: Optional[int] = None):
@@ -1976,7 +1985,7 @@ async def get_sales_summary_for_user(db: AsyncSession, user_id: int):
     # 3. Находим ID категорий "Продажа" и "Возврат"
     op_cat_res = await db.execute(
         select(models.OperationCategories.id, models.OperationCategories.name)
-        .where(models.OperationCategories.name.in_(['Поступление от продажи/услуг', 'Возврат']))
+        .where(models.OperationCategories.name.in_(['Продажи на торг. точках', 'Возврат']))
     )
     op_cat_map = {r.name: r.id for r in op_cat_res.all()}
     
@@ -2438,7 +2447,7 @@ async def get_payroll_report(db: AsyncSession, start_date: date, end_date: date)
     users_result = await db.execute(
         select(models.Users).options(selectinload(models.Users.role))
         .join(models.Users.role)
-        .filter(models.Roles.role_name.in_(['Продавец', 'Технический специалист', 'Администратор']))
+        .filter(models.Roles.role_name.in_(['Продавец', 'Технический специалист','Менеджер', 'Администратор']))
     )
     users = users_result.scalars().all()
 
@@ -2935,7 +2944,8 @@ async def get_financial_analytics(db: AsyncSession, start_date: date, end_date: 
         .filter(
             models.CashFlow.date >= start_date, 
             models.CashFlow.date < end_date_inclusive,
-            models.OperationCategories.type == 'expense'
+            models.OperationCategories.type == 'expense',
+            models.OperationCategories.view != 'Техническая операция'
         )
         .group_by(func.date(models.CashFlow.date))
     )

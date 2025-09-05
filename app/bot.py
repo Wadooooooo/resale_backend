@@ -319,7 +319,7 @@ async def process_account_selected(callback_query: types.CallbackQuery, state: F
                 amount=-abs(user_data['amount']),
                 description=f"Оплата доставки (СДЭК) по заказу ID {order_id}"
             )
-            await crud.create_cash_flow(db=session, cash_flow=cash_flow_data, user_id=1) # Предполагая user_id=1 для системных операций
+            await crud.create_cash_flow(db=session, cash_flow=cash_flow_data, user_id=1, commit=False) # Предполагая user_id=1 для системных операций
 
             # 4. Обновляем статус доставки у заказа и сохраняем
             order_to_update.delivery_payment_status = models.OrderPaymentStatus.ОПЛАЧЕН
