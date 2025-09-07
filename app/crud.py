@@ -3914,3 +3914,97 @@ async def get_company_health_analytics(db: AsyncSession):
         "asset_composition": asset_composition_data
     }
 
+async def get_accessory_analytics(db: AsyncSession, start_date: date, end_date: date) -> List[dict]:
+    """Собирает аналитику по проданным аксессуарам за период."""
+    end_date_inclusive = end_date + timedelta(days=1)
+
+    query = (
+        select(
+            models.Accessories.name,
+            func.sum(models.SaleDetails.quantity).label("units_sold"),
+            func.sum(models.SaleDetails.unit_price * models.SaleDetails.quantity).label("total_revenue"),
+            func.sum(models.SaleDetails.profit).label("total_profit")
+        )
+        .join(models.Sales, models.SaleDetails.sale_id == models.Sales.id)
+        .join(models.Warehouse, models.SaleDetails.warehouse_id == models.Warehouse.id)
+        .join(models.Accessories, models.Warehouse.product_id == models.Accessories.id)
+        .where(
+            models.Warehouse.product_type_id == 2,  # Фильтруем только по аксессуарам
+            models.Sales.sale_date >= start_date,
+            models.Sales.sale_date < end_date_inclusive
+        )
+        .group_by(models.Accessories.name)
+        .order_by(func.sum(models.SaleDetails.quantity).desc())
+    )
+
+    result = await db.execute(query)
+    return [
+        {
+            "accessory_name": row.name,
+            "units_sold": row.units_sold or 0,
+            "total_revenue": row.total_revenue or Decimal('0'),
+            "total_profit": row.total_profit or Decimal('0')
+        }
+        for row in result.all()
+    ]
+
+async def get_fast_moving_low_stock_accessories(db: AsyncSession, threshold: int = 10, days_period: int = 30):
+    """
+    Находит популярные аксессуары (проданные N раз за период),
+    остаток которых на складе меньше или равен порогу.
+    """
+    
+    # 1. Определяем период для анализа "популярности"
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days_period)
+
+    # 2. Находим ID самых продаваемых аксессуаров за этот период
+    top_sellers_subquery = (
+        select(
+            models.Warehouse.product_id,
+            func.sum(models.SaleDetails.quantity).label("units_sold")
+        )
+        .join(models.Sales, models.SaleDetails.sale_id == models.Sales.id)
+        .join(models.Warehouse, models.SaleDetails.warehouse_id == models.Warehouse.id)
+        .where(
+            models.Warehouse.product_type_id == 2, # Только аксессуары
+            models.Sales.sale_date.between(start_date, end_date)
+        )
+        .group_by(models.Warehouse.product_id)
+        .order_by(func.sum(models.SaleDetails.quantity).desc())
+        .limit(20) # Анализируем топ-50 самых продаваемых
+        .subquery()
+    )
+
+    # 3. Находим текущий остаток для этих популярных товаров
+    current_stock_subquery = (
+        select(
+            models.Warehouse.product_id,
+            func.sum(models.Warehouse.quantity).label("total_quantity")
+        )
+        .where(
+            models.Warehouse.product_type_id == 2,
+            models.Warehouse.product_id.in_(select(top_sellers_subquery.c.product_id))
+        )
+        .group_by(models.Warehouse.product_id)
+        .subquery()
+    )
+
+    # 4. Выбираем только те, у которых остаток ниже порога
+    query = (
+        select(
+            models.Accessories,
+            current_stock_subquery.c.total_quantity
+        )
+        .join(current_stock_subquery, models.Accessories.id == current_stock_subquery.c.product_id)
+        .where(current_stock_subquery.c.total_quantity <= threshold)
+        .options(
+            selectinload(models.Accessories.category_accessory),
+            selectinload(models.Accessories.retail_price_accessories)
+        )
+        .order_by(current_stock_subquery.c.total_quantity.asc())
+    )
+
+    result = await db.execute(query)
+    
+    return [{"accessory": acc, "total_quantity": qty} for acc, qty in result.all()]

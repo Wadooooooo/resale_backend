@@ -2271,6 +2271,36 @@ class ShiftResponse(BaseModel):
     shift_start: datetime
     shift_end: Optional[datetime] = None
 
+@app.get("/api/v1/dashboard/low-stock-accessories", response_model=List[schemas.LowStockAccessory], tags=["Dashboard"],
+        dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_sales"))])
+async def get_low_stock_accessories_endpoint(
+    threshold: Optional[int] = 10,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает список аксессуаров с низким остатком на складе."""
+    low_stock_items = await crud.get_fast_moving_low_stock_accessories(db=db, threshold=threshold)
+    
+    # Форматируем ответ в соответствии со схемой
+    response = []
+    for item in low_stock_items:
+        acc = item['accessory']
+        latest_price = None
+        if acc.retail_price_accessories:
+            latest_price_entry = sorted(acc.retail_price_accessories, key=lambda p: p.date, reverse=True)[0]
+            latest_price = latest_price_entry.price
+        
+        response.append({
+            "accessory": {
+                "id": acc.id,
+                "name": acc.name,
+                "barcode": acc.barcode,
+                "category_accessory": acc.category_accessory,
+                "current_price": latest_price
+            },
+            "total_quantity": item['total_quantity']
+        })
+    return response
+
 @app.get("/api/v1/shifts/active", response_model=Optional[ShiftResponse], tags=["Shifts"])
 async def get_user_active_shift(
     db: AsyncSession = Depends(get_db),
@@ -2493,6 +2523,17 @@ async def read_product_analytics_details(
     """Возвращает детали продаж (чеки) для конкретной модели за период."""
     sales = await crud.get_sales_for_product_analytics_details(db, model_name, start_date, end_date)
     return [await _format_sale_response(sale, db) for sale in sales]
+
+@app.get("/api/v1/analytics/accessories", response_model=List[schemas.AccessoryAnalyticsItem], tags=["Analytics"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_accessory_analytics(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает аналитику по продажам аксессуаров за период."""
+    return await crud.get_accessory_analytics(db=db, start_date=start_date, end_date=end_date)
+
 
 @app.get("/api/v1/analytics/employees", response_model=schemas.EmployeeAnalyticsResponse, tags=["Analytics"],
          dependencies=[Depends(security.require_permission("view_reports"))])

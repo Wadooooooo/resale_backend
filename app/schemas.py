@@ -1015,3 +1015,13 @@ class CompanyHealthResponse(BaseModel):
     asset_history: List[AssetHistoryPoint]
     capital_structure: CapitalStructure
     asset_composition: AssetComposition
+
+class AccessoryAnalyticsItem(CustomBaseModel):
+    accessory_name: str
+    units_sold: int
+    total_revenue: Decimal
+    total_profit: Decimal
+
+class LowStockAccessory(BaseModel):
+    accessory: AccessoryDetail
+    total_quantity: int
