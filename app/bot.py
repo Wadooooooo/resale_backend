@@ -245,7 +245,16 @@ async def process_payment_start(callback_query: types.CallbackQuery, state: FSMC
 async def process_amount_entered(message: Message, state: FSMContext):
     """Обрабатывает введенную сумму и запрашивает счет."""
     try:
-        amount = Decimal(message.text)
+        # Пытаемся преобразовать текст в число. 
+        # Дополнительно заменяем запятую на точку для удобства пользователя.
+        amount_text = message.text.replace(',', '.')
+        amount = Decimal(amount_text)
+        
+        # Проверяем, что сумма положительная
+        if amount <= 0:
+            await message.reply("Сумма должна быть положительным числом. Пожалуйста, введите корректное значение.")
+            return
+
         await state.update_data(amount=amount)
 
         # Получаем список счетов для выбора
@@ -264,8 +273,9 @@ async def process_amount_entered(message: Message, state: FSMContext):
         await state.set_state(Payment.waiting_for_account)
         await message.answer("С какого счета произвести оплату?", reply_markup=keyboard)
 
-    except (ValueError, TypeError):
-        await message.reply("Пожалуйста, введите корректное числовое значение для суммы.")
+    except decimal.InvalidOperation:
+        # Если преобразование не удалось, ловим ошибку и просим ввести данные снова
+        await message.reply("Неверный формат суммы. Пожалуйста, введите только число (например, 1234.50).")
 
 @dp.callback_query(Payment.waiting_for_account)
 async def process_account_selected(callback_query: types.CallbackQuery, state: FSMContext):

@@ -1551,7 +1551,7 @@ async def process_return_from_supplier(db: AsyncSession, phone_id: int, user_id:
 
 
 async def process_customer_refund(db: AsyncSession, phone_id: int, refund_data: schemas.RefundRequest, user_id: int):
-    """Обрабатывает возврат телефона от клиента."""
+    """Обрабатывает возврат телефона от клиента (по браку)."""
     phone = await db.get(models.Phones, phone_id)
     if not phone:
         raise HTTPException(status_code=404, detail="Телефон не найден")
@@ -1565,12 +1565,18 @@ async def process_customer_refund(db: AsyncSession, phone_id: int, refund_data: 
     if not warehouse_entry:
         raise HTTPException(status_code=404, detail="Запись о складе для этого телефона не найдена")
 
+    # Загружаем sale_detail вместе с самой продажей (sale)
     sale_detail_result = await db.execute(
-        select(models.SaleDetails).filter_by(warehouse_id=warehouse_entry.id)
+        select(models.SaleDetails).options(
+            selectinload(models.SaleDetails.sale)
+        ).filter_by(warehouse_id=warehouse_entry.id)
     )
     sale_detail = sale_detail_result.scalars().first()
-    if not sale_detail:
+
+    if not sale_detail or not sale_detail.sale: # Проверяем, что продажа найдена
         raise HTTPException(status_code=404, detail="Запись о продаже для этого телефона не найдена")
+
+    sale = sale_detail.sale
 
     phone.technical_status = models.TechStatus.БРАК
     phone.commercial_status = models.CommerceStatus.ВОЗВРАТ
@@ -1581,17 +1587,19 @@ async def process_customer_refund(db: AsyncSession, phone_id: int, refund_data: 
         phone_id=phone.id,
         user_id=user_id,
         event_type=models.PhoneEventType.ВОЗВРАТ_ОТ_КЛИЕНТА,
-        details=f"Возврат по продаже №{sale_detail.sale_id}. Сумма: {sale_detail.unit_price} руб. Причина: {refund_data.notes or 'не указана'}."
+        details=f"Возврат по браку (Продажа №{sale.id}). Сумма: {sale.total_amount} руб. Причина: {refund_data.notes or 'не указана'}."
     )
     db.add(log_entry)
     
-    refund_amount = sale_detail.unit_price
+    # Используем total_amount из продажи, а не unit_price из детали
+    refund_amount = sale.total_amount
+
     cash_flow_entry = models.CashFlow(
         date=datetime.now(),
-        operation_categories_id=6,
+        operation_categories_id=6, # ID категории "Возврат"
         account_id=refund_data.account_id,
         amount=-refund_amount,
-        description=f"Возврат средств за телефон S/N: {phone.serial_number}. Продажа ID: {sale_detail.sale_id}. {refund_data.notes or ''}".strip(),
+        description=f"Возврат средств за телефон S/N: {phone.serial_number}. Продажа ID: {sale.id}. {refund_data.notes or ''}".strip(),
         currency_id=1,
         user_id=user_id
     )
@@ -1603,6 +1611,66 @@ async def process_customer_refund(db: AsyncSession, phone_id: int, refund_data: 
     await db.refresh(phone)
     return phone
 
+async def cancel_sale(db: AsyncSession, sale_id: int, user_id: int):
+    """Полностью отменяет продажу, возвращая все в исходное состояние."""
+    sale_result = await db.execute(
+        select(models.Sales).options(
+            selectinload(models.Sales.sale_details).selectinload(models.SaleDetails.warehouse),
+            selectinload(models.Sales.payments).selectinload(models.SalePayments.account)
+        ).filter(models.Sales.id == sale_id)
+    )
+    sale = sale_result.scalars().unique().one_or_none()
+
+    if not sale:
+        raise HTTPException(status_code=404, detail="Продажа не найдена")
+    if sale.payment_status == models.StatusPay.ОТМЕНА:
+        raise HTTPException(status_code=400, detail="Эта продажа уже отменена")
+
+    # 1. Находим категорию для операции возврата по имени, а не по ID
+    refund_category_result = await db.execute(
+        select(models.OperationCategories).filter(models.OperationCategories.name == "Возвраты клиентам")
+    )
+    refund_category = refund_category_result.scalars().first()
+    if not refund_category:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Категория операции 'Возвраты клиентам' не найдена. Пожалуйста, создайте ее."
+        )
+
+    # 2. Отменяем финансовые операции
+    for payment in sale.payments:
+        db.add(models.CashFlow(
+            date=datetime.now(),
+            operation_categories_id=refund_category.id, # Используем найденный ID
+            account_id=payment.account_id,
+            amount=-payment.amount, # Создаем обратную проводку
+            description=f"Отмена продажи №{sale.id}",
+            currency_id=1,
+            user_id=user_id
+        ))
+
+    # 3. Меняем статус продажи
+    sale.payment_status = models.StatusPay.ОТМЕНА
+
+    # 4. Возвращаем товары на склад
+    for detail in sale.sale_details:
+        if detail.warehouse:
+            detail.warehouse.quantity += detail.quantity
+            
+            if detail.warehouse.product_type_id == 1:
+                phone = await db.get(models.Phones, detail.warehouse.product_id)
+                if phone:
+                    phone.commercial_status = models.CommerceStatus.НА_СКЛАДЕ
+                    
+                    db.add(models.PhoneMovementLog(
+                        phone_id=phone.id,
+                        user_id=user_id,
+                        event_type=models.PhoneEventType.ОТМЕНА_ПРОДАЖИ,
+                        details=f"Продажа №{sale.id} отменена. Товар возвращен на склад."
+                    ))
+    
+    await db.commit()
+    return {"message": "Продажа успешно отменена"}
 
 async def start_repair(db: AsyncSession, phone_id: int, repair_data: schemas.RepairCreate, user_id: int):
     """Начинает ремонт и НЕ ВОЗВРАЩАЕТ ОБЪЕКТ."""

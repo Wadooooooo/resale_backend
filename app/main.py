@@ -1647,6 +1647,16 @@ async def read_sale_by_id(sale_id: int, db: AsyncSession = Depends(get_db)):
     # Используем существующий форматер для ответа
     return await _format_sale_response(sale, db)
 
+@app.post("/api/v1/sales/{sale_id}/cancel", status_code=status.HTTP_200_OK, tags=["Sales"],
+          dependencies=[Depends(security.require_permission("perform_sales"))])
+async def cancel_sale_endpoint(
+    sale_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Полностью отменяет продажу (для исправления ошибок)."""
+    return await crud.cancel_sale(db=db, sale_id=sale_id, user_id=current_user.id)
+
 @app.post("/api/v1/accessories/{accessory_id}/prices", response_model=schemas.RetailPriceResponse, tags=["Pricing"]
           ,dependencies=[Depends(security.require_permission("manage_pricing"))])
 async def create_price_for_accessory(
