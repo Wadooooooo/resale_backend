@@ -13,6 +13,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 from decimal import Decimal
 import secrets
+import httpx
 
 from fastapi.responses import JSONResponse
 from fastapi import Depends, FastAPI, HTTPException, status, Request
@@ -27,7 +28,7 @@ from .models import format_enum_value_for_display
 # Удалить этот импорт, так как используется AsyncSession
 # from sqlalchemy.orm import Session 
 from pydantic import ValidationError
-from . import crud, schemas, security, models
+from . import crud, schemas, security, models, sdek_api
 from .database import get_db
 from fastapi.middleware.cors import CORSMiddleware
 # Следующие импорты больше не нужны, если FastAPI не отдает статику
@@ -46,9 +47,17 @@ async def health_check():
 
 origins = [
     "http://localhost:5173",
+    "http://127.0.0.1:5173",
     "http://localhost:5174" # Адрес вашего React-приложения
     # Можно добавить и другие адреса, если понадобится
 ]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"], # Разрешаем все методы (GET, POST, PUT и т.д.)
+    allow_headers=["*"], # Разрешаем все заголовки
+)
 
 async def close_overdue_shifts():
     """Находит все незавершенные смены и закрывает их в 23:59."""
@@ -1187,22 +1196,30 @@ async def read_supplier_orders(
                 order_date=order.order_date,
                 status=formatted_status_delivery,
                 payment_status=formatted_payment_status,
-                details=formatted_details
+                details=formatted_details,
+                sdek_order_uuid=order.sdek_order_uuid,
+                sdek_track_number=order.sdek_track_number
             )
         )
     return formatted_orders
 
 
-@app.put("/api/v1/supplier-orders/{order_id}/receive", response_model=schemas.SupplierOrder, tags=["Supplier Orders"], dependencies=[Depends(security.require_any_permission("manage_inventory", "receive_supplier_orders"))])
+@app.post("/api/v1/supplier-orders/{order_id}/receive", response_model=schemas.SupplierOrder, tags=["Supplier Orders"], dependencies=[Depends(security.require_any_permission("manage_inventory", "receive_supplier_orders"))])
 async def receive_order(
     order_id: int,
+    request_data: schemas.ReceiveOrderRequest, # Принимаем тело запроса
     db: AsyncSession = Depends(get_db),
-    current_user: schemas.User = Depends(security.get_current_active_user),
+    current_user: models.Users = Depends(security.get_current_active_user),
 ):
     """
-    Отметить заказ как "Получен" и добавить все телефоны из него на склад.
+    Отметить заказ как "Получен", оприходовать товары и обработать возвращенные с заказом телефоны.
     """
-    updated_order = await crud.receive_supplier_order(db=db, order_id=order_id, user_id=current_user.id)    
+    updated_order = await crud.receive_supplier_order(
+        db=db, 
+        order_id=order_id, 
+        returned_phone_ids=request_data.returned_phone_ids, # Передаем список ID в CRUD
+        user_id=current_user.id
+    )    
 
     result = await db.execute(
         select(models.SupplierOrders).options(
@@ -1880,6 +1897,67 @@ async def read_compatible_accessories(model_name_id: int, db: AsyncSession = Dep
     return response_list
 
 # --- Эндпоинты для управления браком и возвратами ---
+@app.post("/api/v1/return-shipments", response_model=schemas.ReturnShipmentSchema, tags=["Returns"])
+async def create_new_return_shipment(
+    shipment_data: schemas.ReturnShipmentCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Создает новую отправку брака поставщику."""
+    return await crud.create_return_shipment(db=db, shipment_data=shipment_data, user_id=current_user.id)
+
+@app.get("/api/v1/return-shipments", response_model=List[schemas.ReturnShipmentSchema], tags=["Returns"])
+async def read_return_shipments(db: AsyncSession = Depends(get_db)):
+    """Получает список всех отправок брака."""
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавляем ручное форматирование ответа ---
+    shipments = await crud.get_return_shipments(db=db)
+    
+    response_list = []
+    for shipment in shipments:
+        formatted_items = []
+        for item in shipment.items:
+            # Используем нашу готовую функцию для форматирования каждого телефона
+            formatted_phone = _format_phone_response(item.phone)
+            formatted_items.append(schemas.ReturnShipmentItemSchema(phone=formatted_phone))
+
+        response_list.append(
+            schemas.ReturnShipmentSchema(
+                id=shipment.id,
+                supplier=shipment.supplier,
+                created_date=shipment.created_date,
+                track_number=shipment.track_number,
+                status=shipment.status,
+                items=formatted_items
+            )
+        )
+    return response_list
+
+@app.post("/api/v1/return-shipments/{shipment_id}/create-sdek-order", tags=["Returns"])
+async def create_sdek_order_for_return_shipment(
+    shipment_id: int,
+    sdek_data: schemas.SdekOrderRequest, # Используем ту же схему, что и для заказов
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    """Создает заказ в СДЭК для существующей отправки брака и обновляет ее трек-номером."""
+    # Получаем токен СДЭК
+    token = await sdek_api.get_sdek_token()
+
+    # Формируем данные для СДЭК
+    full_sdek_data = sdek_data.model_dump()
+    full_sdek_data['supplier_order_id'] = f"RET-{shipment_id}" # Уникальный ID для СДЭК
+    
+    # Создаем заказ в СДЭК
+    sdek_response = await sdek_api.create_sdek_delivery_order(full_sdek_data, token)
+    
+    # Обновляем нашу отправку трек-номером
+    updated_shipment = await crud.update_return_shipment_with_sdek_info(
+        db=db,
+        shipment_id=shipment_id,
+        sdek_uuid=sdek_response.get('entity', {}).get('uuid'),
+        track_number=sdek_response.get('entity', {}).get('cdek_number')
+    )
+    return {"message": "Заказ в СДЭК успешно создан!", "track_number": updated_shipment.sdek_track_number}
 
 @app.get("/api/v1/phones/defective", response_model=List[schemas.Phone], tags=["Returns"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_inspections"))])
 async def read_defective_phones(db: AsyncSession = Depends(get_db)):
@@ -2692,3 +2770,78 @@ async def create_new_model_number(
 ):
     """Creates a new model number."""
     return await crud.create_model_number(db=db, model_number_data=model_number_data)
+
+@app.post("/api/v1/sdek/calculate-cost", tags=["SDEK Integration"])
+async def calculate_sdek_cost(
+    sdek_data: schemas.SdekCalculationRequest,
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    token = await sdek_api.get_sdek_token()
+    calculation_result = await sdek_api.calculate_sdek_delivery_cost(sdek_data.model_dump(), token)
+    return calculation_result
+
+
+@app.post("/api/v1/supplier-orders/{order_id}/create-sdek-delivery", tags=["Supplier Orders"])
+async def create_sdek_order_for_supplier_order(
+    order_id: int,
+    sdek_data: schemas.SdekOrderRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Users = Depends(security.get_current_active_user)
+):
+    order = await db.get(models.SupplierOrders, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ у поставщика не найден")
+
+    token = await sdek_api.get_sdek_token()
+
+    full_sdek_data = sdek_data.model_dump()
+    full_sdek_data['supplier_order_id'] = order_id
+    full_sdek_data['to_location_address'] = "г. Оренбург, ул. Рокоссовского, 25"
+    sdek_response = await sdek_api.create_sdek_delivery_order(full_sdek_data, token)
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Получаем данные напрямую из ответа СДЭК
+    sdek_entity = sdek_response.get('entity', {})
+    sdek_uuid = sdek_entity.get('uuid')
+    sdek_track_number = sdek_entity.get('cdek_number')
+    
+    # Сохраняем их в наш объект заказа в БД
+    order.sdek_order_uuid = sdek_uuid
+    order.sdek_track_number = sdek_track_number
+
+    await db.commit()
+    # Мы больше не будем использовать db.refresh(order), так как он не работает стабильно
+
+    # Возвращаем на фронтенд те данные, что мы только что получили,
+    # а не пытаемся их снова прочитать из нестабильного объекта 'order'.
+    return {
+        "message": "Заказ в СДЭК успешно создан!", 
+        "track_number": sdek_track_number, 
+        "sdek_uuid": sdek_uuid
+    }
+
+DADATA_API_KEY = os.getenv("DADATA_API_KEY")
+
+@app.post("/api/v1/utils/suggest-address", tags=["Utilities"])
+async def suggest_address(
+    request_data: schemas.AddressQuery
+):
+    """Прокси-эндпоинт для получения подсказок адресов от DaData."""
+    if not DADATA_API_KEY:
+        raise HTTPException(status_code=500, detail="API-ключ DaData не настроен на сервере.")
+    
+    url = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address"
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Token {DADATA_API_KEY}"
+    }
+    payload = {"query": request_data.query, "count": 5}
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)

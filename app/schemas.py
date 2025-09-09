@@ -224,6 +224,9 @@ class SupplierOrderDetail(SupplierOrderDetailCreate):
     class Config:
         from_attributes = True # Позволит Pydantic маппить из ORM объектов
 
+class ReceiveOrderRequest(BaseModel):
+    returned_phone_ids: List[int] = [] 
+
 # ИСПРАВЛЕНО: SupplierOrderCreate теперь находится выше, чем SupplierOrder
 class SupplierOrderCreate(BaseModel):
     supplier_id: int
@@ -244,6 +247,8 @@ class SupplierOrder(BaseModel):
     status: Optional[str] = None
     payment_status: Optional[str] = None
     details: List[SupplierOrderDetail] = [] # Ссылается на уже определенный SupplierOrderDetail
+    sdek_order_uuid: Optional[str] = None
+    sdek_track_number: Optional[str] = None
     class Config:
         from_attributes = True
         
@@ -1025,3 +1030,46 @@ class AccessoryAnalyticsItem(CustomBaseModel):
 class LowStockAccessory(BaseModel):
     accessory: AccessoryDetail
     total_quantity: int
+
+class SdekOrderRequest(CustomBaseModel):
+    sender_name: str
+    sender_phone: str
+    from_location_address: str
+    to_location_address: Optional[str] = None
+    weight: int
+    length: int
+    width: int
+    height: int
+
+class SdekCalculationRequest(CustomBaseModel):
+    from_location_address: str
+    weight: int
+    length: int
+    width: int
+    height: int
+
+class AddressQuery(BaseModel):
+    query: str
+
+class ReturnShipmentItemSchema(BaseModel):
+    phone: Phone # Используем существующую схему Phone для деталей
+
+    class Config:
+        from_attributes = True
+
+class ReturnShipmentSchema(BaseModel):
+    id: int
+    supplier: Supplier
+    created_date: datetime
+    track_number: Optional[str] = None
+    status: str
+    items: List[ReturnShipmentItemSchema] = []
+
+    class Config:
+        from_attributes = True
+
+class ReturnShipmentCreate(BaseModel):
+    supplier_id: int
+    phone_ids: List[int]
+    track_number: Optional[str] = None
+

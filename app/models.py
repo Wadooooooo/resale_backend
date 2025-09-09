@@ -122,6 +122,8 @@ class SupplierOrders(Base):
     status: Mapped[Optional[StatusDelivery]] = mapped_column(Enum(StatusDelivery, native_enum=False)) 
     payment_status: Mapped[Optional[OrderPaymentStatus]] = mapped_column(Enum(OrderPaymentStatus, native_enum=False), default=OrderPaymentStatus.НЕ_ОПЛАЧЕН)
     delivery_payment_status: Mapped[Optional[OrderPaymentStatus]] = mapped_column(Enum(OrderPaymentStatus, native_enum=False), default=OrderPaymentStatus.НЕ_ОПЛАЧЕН, nullable=False)
+    sdek_order_uuid: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    sdek_track_number: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     supplier: Mapped[Optional["Supplier"]] = relationship("Supplier", back_populates="supplier_orders")
     phones: Mapped[List["Phones"]] = relationship("Phones", back_populates="supplier_order")
@@ -997,4 +999,28 @@ class DividendCalculations(Base):
     # Связи для удобного доступа к срезам
     start_snapshot: Mapped["FinancialSnapshot"] = relationship("FinancialSnapshot", foreign_keys=[start_snapshot_id])
     end_snapshot: Mapped["FinancialSnapshot"] = relationship("FinancialSnapshot", foreign_keys=[end_snapshot_id])
+
+class ReturnShipment(Base):
+    __tablename__ = "return_shipments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    supplier_id: Mapped[int] = mapped_column(Integer, ForeignKey("supplier.id"))
+    created_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    track_number: Mapped[Optional[str]] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(50), default="В сборке") # Например: В сборке, Отправлен, Завершен
+    sdek_order_uuid: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    sdek_track_number: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    supplier: Mapped["Supplier"] = relationship("Supplier")
+    items: Mapped[List["ReturnShipmentItem"]] = relationship("ReturnShipmentItem", back_populates="shipment")
+
+class ReturnShipmentItem(Base):
+    __tablename__ = "return_shipment_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    shipment_id: Mapped[int] = mapped_column(Integer, ForeignKey("return_shipments.id"))
+    phone_id: Mapped[int] = mapped_column(Integer, ForeignKey("phones.id"))
+
+    shipment: Mapped["ReturnShipment"] = relationship("ReturnShipment", back_populates="items")
+    phone: Mapped["Phones"] = relationship("Phones")
 

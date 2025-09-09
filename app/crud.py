@@ -179,9 +179,9 @@ async def create_initial_inspection(db: AsyncSession, phone_id: int, inspection_
     checklist_summary_lines = []
     for res in inspection_data.results:
         item_name = checklist_items_map.get(res.checklist_item_id, "Неизвестный пункт")
-        status = "Пройдено" if res.result else "БРАК"
+        status_text = "Пройдено" if res.result else "БРАК"
         notes = f" ({res.notes})" if res.notes else ""
-        checklist_summary_lines.append(f"{item_name}: {status}{notes}")
+        checklist_summary_lines.append(f"{item_name}: {status_text}{notes}")
     checklist_summary_str = "\n".join(checklist_summary_lines)
     
     has_failed_checks = any(not item.result for item in inspection_data.results)
@@ -645,7 +645,7 @@ async def get_supplier_orders(db: AsyncSession, skip: int = 0, limit: int = 1000
     result = await db.execute(orders_query)
     return result.scalars().unique().all()
 
-async def receive_supplier_order(db: AsyncSession, order_id: int, user_id: int):
+async def receive_supplier_order(db: AsyncSession, order_id: int, returned_phone_ids: List[int], user_id: int):
     """Обрабатывает получение заказа, добавляет товары и создает первую запись в логе."""
     result = await db.execute(
         select(models.SupplierOrders).options(
@@ -716,6 +716,25 @@ async def receive_supplier_order(db: AsyncSession, order_id: int, user_id: int):
 
     if log_entries:
         db.add_all(log_entries)
+    
+    if returned_phone_ids:
+        # Загружаем телефоны, которые нужно обновить
+        returned_phones_res = await db.execute(
+            select(models.Phones).filter(models.Phones.id.in_(returned_phone_ids))
+        )
+        returned_phones = returned_phones_res.scalars().all()
+        
+        for phone in returned_phones:
+            # Проверяем, что телефон действительно был отправлен поставщику
+            if phone.commercial_status == models.CommerceStatus.ОТПРАВЛЕН_ПОСТАВЩИКУ:
+                phone.technical_status = models.TechStatus.ОЖИДАЕТ_ПРОВЕРКУ
+                phone.commercial_status = models.CommerceStatus.НЕ_ГОТОВ_К_ПРОДАЖЕ
+                
+                db.add(models.PhoneMovementLog(
+                    phone_id=phone.id, user_id=user_id,
+                    event_type=models.PhoneEventType.ПОЛУЧЕН_ОТ_ПОСТАВЩИКА,
+                    details=f"Получен от поставщика вместе с заказом №{order.id}. Направлен на повторную инспекцию."
+                ))
 
     await db.commit()
     await db.refresh(order)
@@ -4008,3 +4027,70 @@ async def get_fast_moving_low_stock_accessories(db: AsyncSession, threshold: int
     result = await db.execute(query)
     
     return [{"accessory": acc, "total_quantity": qty} for acc, qty in result.all()]
+
+async def create_return_shipment(db: AsyncSession, shipment_data: schemas.ReturnShipmentCreate, user_id: int):
+    """Создает отправку брака поставщику и обновляет статусы телефонов."""
+    if not shipment_data.phone_ids:
+        raise HTTPException(status_code=400, detail="Не выбраны телефоны для отправки.")
+
+    # Создаем саму отправку
+    new_shipment = models.ReturnShipment(
+        supplier_id=shipment_data.supplier_id,
+        track_number=shipment_data.track_number,
+        status="Отправлен" if shipment_data.track_number else "В сборке"
+    )
+    db.add(new_shipment)
+    await db.flush()
+
+    # Находим телефоны и привязываем их к отправке
+    phones_to_update_res = await db.execute(
+        select(models.Phones).filter(models.Phones.id.in_(shipment_data.phone_ids))
+    )
+    phones_to_update = phones_to_update_res.scalars().all()
+
+    for phone in phones_to_update:
+        if phone.technical_status != models.TechStatus.БРАК:
+            raise HTTPException(status_code=400, detail=f"Телефон ID {phone.id} не является браком.")
+        
+        # Обновляем статус телефона
+        phone.commercial_status = models.CommerceStatus.ОТПРАВЛЕН_ПОСТАВЩИКУ
+        
+        # Создаем элемент отправки
+        db.add(models.ReturnShipmentItem(shipment_id=new_shipment.id, phone_id=phone.id))
+        
+        # Создаем лог
+        log_details = f"Отправлен поставщику в составе отправки №{new_shipment.id}."
+        if shipment_data.track_number:
+            log_details += f" Трек-номер: {shipment_data.track_number}"
+            
+        db.add(models.PhoneMovementLog(
+            phone_id=phone.id,
+            user_id=user_id,
+            event_type=models.PhoneEventType.ОТПРАВЛЕН_ПОСТАВЩИКУ,
+            details=log_details
+        ))
+
+    await db.commit()
+    await db.refresh(new_shipment)
+    return new_shipment
+
+
+async def get_return_shipments(db: AsyncSession):
+    """Получает список всех отправок брака."""
+    query = (
+        select(models.ReturnShipment)
+        .options(
+            selectinload(models.ReturnShipment.supplier),
+            selectinload(models.ReturnShipment.items).selectinload(models.ReturnShipmentItem.phone).options(
+                selectinload(models.Phones.model).options(
+                    selectinload(models.Models.model_name),
+                    selectinload(models.Models.storage),
+                    selectinload(models.Models.color)
+                )
+            )
+        )
+        .order_by(models.ReturnShipment.id.desc())
+    )
+    result = await db.execute(query)
+    return result.scalars().unique().all()
+
