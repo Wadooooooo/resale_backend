@@ -1904,28 +1904,63 @@ async def create_new_return_shipment(
     current_user: models.Users = Depends(security.get_current_active_user)
 ):
     """Создает новую отправку брака поставщику."""
-    return await crud.create_return_shipment(db=db, shipment_data=shipment_data, user_id=current_user.id)
+    
+    # Шаг 1: CRUD функция возвращает ТОЛЬКО ID новой отправки
+    new_shipment_id = await crud.create_return_shipment(
+        db=db, shipment_data=shipment_data, user_id=current_user.id
+    )
+
+    # Шаг 2: Используя этот ID, мы делаем "чистый" запрос к другой CRUD-функции
+    fresh_shipment = await crud.get_return_shipment_by_id(db, new_shipment_id)
+    if not fresh_shipment:
+        raise HTTPException(status_code=404, detail="Не удалось найти только что созданную отправку")
+
+    # Шаг 3: Теперь мы вручную и надежно форматируем ответ
+    formatted_items = []
+    if fresh_shipment.items:
+        for item in fresh_shipment.items:
+            formatted_phone = _format_phone_response(item.phone)
+            formatted_items.append(schemas.ReturnShipmentItemSchema(phone=formatted_phone))
+
+    response = schemas.ReturnShipmentSchema(
+        id=fresh_shipment.id,
+        supplier=fresh_shipment.supplier,
+        created_date=fresh_shipment.created_date,
+        track_number=fresh_shipment.track_number,
+        sdek_track_number=fresh_shipment.sdek_track_number,
+        status=fresh_shipment.status,
+        items=formatted_items
+    )
+    
+    return response
+
 
 @app.get("/api/v1/return-shipments", response_model=List[schemas.ReturnShipmentSchema], tags=["Returns"])
 async def read_return_shipments(db: AsyncSession = Depends(get_db)):
     """Получает список всех отправок брака."""
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавляем ручное форматирование ответа ---
+
+    # 1. Сначала получаем все отправки из базы данных
     shipments = await crud.get_return_shipments(db=db)
-    
+
+    # 2. Теперь вручную и надежно форматируем каждую из них для ответа
     response_list = []
     for shipment in shipments:
         formatted_items = []
-        for item in shipment.items:
-            # Используем нашу готовую функцию для форматирования каждого телефона
-            formatted_phone = _format_phone_response(item.phone)
-            formatted_items.append(schemas.ReturnShipmentItemSchema(phone=formatted_phone))
+        if shipment.items:
+            for item in shipment.items:
+                # Используем вашу вспомогательную функцию _format_phone_response,
+                # которая гарантированно правильно собирает все данные о телефоне.
+                formatted_phone = _format_phone_response(item.phone)
+                formatted_items.append(schemas.ReturnShipmentItemSchema(phone=formatted_phone))
 
+        # Собираем итоговый объект для одной отправки
         response_list.append(
             schemas.ReturnShipmentSchema(
                 id=shipment.id,
                 supplier=shipment.supplier,
                 created_date=shipment.created_date,
                 track_number=shipment.track_number,
+                sdek_track_number=shipment.sdek_track_number, 
                 status=shipment.status,
                 items=formatted_items
             )
@@ -1935,28 +1970,67 @@ async def read_return_shipments(db: AsyncSession = Depends(get_db)):
 @app.post("/api/v1/return-shipments/{shipment_id}/create-sdek-order", tags=["Returns"])
 async def create_sdek_order_for_return_shipment(
     shipment_id: int,
-    sdek_data: schemas.SdekOrderRequest, # Используем ту же схему, что и для заказов
-    db: AsyncSession = Depends(get_db),
-    current_user: models.Users = Depends(security.get_current_active_user)
+    sdek_data: schemas.SdekReturnOrderRequest,
+    db: AsyncSession = Depends(get_db)
 ):
-    """Создает заказ в СДЭК для существующей отправки брака и обновляет ее трек-номером."""
-    # Получаем токен СДЭК
-    token = await sdek_api.get_sdek_token()
+    """Создает заказ в СДЭК для существующей отправки брака."""
 
-    # Формируем данные для СДЭК
-    full_sdek_data = sdek_data.model_dump()
-    full_sdek_data['supplier_order_id'] = f"RET-{shipment_id}" # Уникальный ID для СДЭК
-    
-    # Создаем заказ в СДЭК
-    sdek_response = await sdek_api.create_sdek_delivery_order(full_sdek_data, token)
-    
-    # Обновляем нашу отправку трек-номером
+    # --- ИЗМЕНЕНИЕ 1: Более полный запрос к БД ---
+    # Теперь мы "жадно" загружаем абсолютно все, что может понадобиться
+    shipment_res = await db.execute(
+        select(models.ReturnShipment).options(
+            selectinload(models.ReturnShipment.supplier),
+            selectinload(models.ReturnShipment.items).selectinload(models.ReturnShipmentItem.phone).options(
+                selectinload(models.Phones.model).options(
+                    selectinload(models.Models.model_name),
+                    selectinload(models.Models.storage),
+                    selectinload(models.Models.color)
+                ),
+                selectinload(models.Phones.model_number),
+                selectinload(models.Phones.supplier_order)
+            )
+        ).filter(models.ReturnShipment.id == shipment_id)
+    )
+    shipment = shipment_res.scalars().unique().one_or_none()
+
+    if not shipment or not shipment.supplier:
+        raise HTTPException(status_code=404, detail="Отправка или поставщик не найдены")
+
+    # --- ИЗМЕНЕНИЕ 2: Ручное форматирование данных перед отправкой ---
+    # Вместо проблемного from_orm, мы используем нашу надежную функцию _format_phone_response
+    items_for_sdek = []
+    for item in shipment.items:
+        formatted_phone = _format_phone_response(item.phone)
+        # .model_dump() превращает Pydantic-схему в словарь, который ожидает функция СДЭК
+        items_for_sdek.append({"phone": formatted_phone.model_dump()})
+
+    shipment_details_for_sdek = {
+        "shipment_id": shipment.id,
+        "supplier_name": sdek_data.recipient_name,
+        "supplier_phone": sdek_data.recipient_phone,
+        "supplier_address": sdek_data.to_location_address,
+        "items": items_for_sdek, # <-- Используем отформатированный список
+        "package_dims": {
+            "weight": sdek_data.weight,
+            "length": sdek_data.length,
+            "width": sdek_data.width,
+            "height": sdek_data.height
+        },
+        "declared_value": sdek_data.declared_value
+    }
+
+    # Остальная часть функции без изменений
+    token = await sdek_api.get_sdek_token()
+    sdek_response = await sdek_api.create_sdek_return_order(shipment_details_for_sdek, token)
+
+    sdek_entity = sdek_response.get('entity', {})
     updated_shipment = await crud.update_return_shipment_with_sdek_info(
         db=db,
         shipment_id=shipment_id,
-        sdek_uuid=sdek_response.get('entity', {}).get('uuid'),
-        track_number=sdek_response.get('entity', {}).get('cdek_number')
+        sdek_uuid=sdek_entity.get('uuid'),
+        track_number=sdek_entity.get('cdek_number')
     )
+
     return {"message": "Заказ в СДЭК успешно создан!", "track_number": updated_shipment.sdek_track_number}
 
 @app.get("/api/v1/phones/defective", response_model=List[schemas.Phone], tags=["Returns"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_inspections"))])
@@ -1970,42 +2044,44 @@ async def read_phones_sent_to_supplier(db: AsyncSession = Depends(get_db)):
     phones = await crud.get_phones_sent_to_supplier(db=db)
     return [_format_phone_response(p) for p in phones]
 
-@app.post("/api/v1/phones/send-to-supplier", response_model=List[schemas.Phone], tags=["Returns"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_inspections"))])
-async def mark_phones_as_sent_to_supplier(
-    phone_ids: List[int], 
-    db: AsyncSession = Depends(get_db),
-    current_user: models.Users = Depends(security.get_current_active_user)):
-    updated_phones = await crud.send_phones_to_supplier(db=db, phone_ids=phone_ids, user_id=current_user.id)
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавляем форматирование ---
-    # Этот код форматирует ответ так же, как мы делали в других эндпоинтах,
-    # чтобы избежать ошибок валидации.
-    formatted_phones = []
-    for phone in updated_phones:
-        phone_dict = phone.__dict__
-        if phone.model:
-            model_name_base = phone.model.model_name.name if phone.model.model_name else ""
-            storage_display = models.format_storage_for_display(phone.model.storage.storage) if phone.model.storage else ""
-            color_name = phone.model.color.color_name if phone.model.color else ""
-            full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
-            phone_dict['model'] = schemas.ModelDetail(
-                id=phone.model.id,
-                name=full_display_name,
-                base_name=model_name_base,
-                model_name_id=phone.model.model_name_id,
-                storage_id=phone.model.storage_id,
-                color_id=phone.model.color_id
-            )
 
-        # Преобразуем Enum в строку для Pydantic
-        if 'technical_status' in phone_dict and hasattr(phone_dict['technical_status'], 'value'):
-            phone_dict['technical_status'] = phone_dict['technical_status'].value
-        if 'commercial_status' in phone_dict and hasattr(phone_dict['commercial_status'], 'value'):
-            phone_dict['commercial_status'] = phone_dict['commercial_status'].value
+# @app.post("/api/v1/phones/send-to-supplier", response_model=List[schemas.Phone], tags=["Returns"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_inspections"))])
+# async def mark_phones_as_sent_to_supplier(
+#     phone_ids: List[int], 
+#     db: AsyncSession = Depends(get_db),
+#     current_user: models.Users = Depends(security.get_current_active_user)):
+#     updated_phones = await crud.send_phones_to_supplier(db=db, phone_ids=phone_ids, user_id=current_user.id)
 
-        formatted_phones.append(schemas.Phone.model_validate(phone_dict))
+#     # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавляем форматирование ---
+#     # Этот код форматирует ответ так же, как мы делали в других эндпоинтах,
+#     # чтобы избежать ошибок валидации.
+#     formatted_phones = []
+#     for phone in updated_phones:
+#         phone_dict = phone.__dict__
+#         if phone.model:
+#             model_name_base = phone.model.model_name.name if phone.model.model_name else ""
+#             storage_display = models.format_storage_for_display(phone.model.storage.storage) if phone.model.storage else ""
+#             color_name = phone.model.color.color_name if phone.model.color else ""
+#             full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
+#             phone_dict['model'] = schemas.ModelDetail(
+#                 id=phone.model.id,
+#                 name=full_display_name,
+#                 base_name=model_name_base,
+#                 model_name_id=phone.model.model_name_id,
+#                 storage_id=phone.model.storage_id,
+#                 color_id=phone.model.color_id
+#             )
 
-    return formatted_phones
+#         # Преобразуем Enum в строку для Pydantic
+#         if 'technical_status' in phone_dict and hasattr(phone_dict['technical_status'], 'value'):
+#             phone_dict['technical_status'] = phone_dict['technical_status'].value
+#         if 'commercial_status' in phone_dict and hasattr(phone_dict['commercial_status'], 'value'):
+#             phone_dict['commercial_status'] = phone_dict['commercial_status'].value
+
+#         formatted_phones.append(schemas.Phone.model_validate(phone_dict))
+
+#     return formatted_phones
 
 @app.post("/api/v1/phones/{phone_id}/return-from-supplier", response_model=schemas.Phone, tags=["Returns"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_inspections"))])
 async def process_phone_return_from_supplier(phone_id: int, db: AsyncSession = Depends(get_db), current_user: models.Users = Depends(security.get_current_active_user)):

@@ -109,6 +109,7 @@ class Supplier(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[Optional[str]] = mapped_column(String(255))
     contact_info: Mapped[str] = mapped_column(Text, nullable=False)
+    address: Mapped[Optional[str]] = mapped_column(Text)
     
     supplier_orders: Mapped[List["SupplierOrders"]] = relationship("SupplierOrders", back_populates="supplier")
 
@@ -286,6 +287,7 @@ class ChecklistItems(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[Optional[str]] = mapped_column(String(255))
     notes: Mapped[Optional[str]] = mapped_column(Text)
+    display_order: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
     
     # Relationships
     inspection_results: Mapped[List["InspectionResults"]] = relationship("InspectionResults", back_populates="checklist_item")

@@ -161,6 +161,9 @@ class Phone(BaseModel):
     storage_location: Optional[str] = None
     defect_reason: Optional[str] = None
 
+    class Config:
+        from_attributes = True
+
 
 class PhoneCreate(BaseModel):
     serial_number: Optional[str] = None
@@ -195,6 +198,7 @@ class GroupedPhoneInStock(BaseModel):
 class SupplierBase(BaseModel):
     name: Optional[str] = None
     contact_info: str
+    address: Optional[str] = None
 
 class SupplierCreate(SupplierBase):
     pass
@@ -1062,6 +1066,7 @@ class ReturnShipmentSchema(BaseModel):
     supplier: Supplier
     created_date: datetime
     track_number: Optional[str] = None
+    sdek_track_number: Optional[str] = None
     status: str
     items: List[ReturnShipmentItemSchema] = []
 
@@ -1073,3 +1078,12 @@ class ReturnShipmentCreate(BaseModel):
     phone_ids: List[int]
     track_number: Optional[str] = None
 
+class SdekReturnOrderRequest(BaseModel):
+    weight: int
+    length: int
+    width: int
+    height: int
+    recipient_name: str
+    recipient_phone: str
+    to_location_address: str
+    declared_value: Decimal

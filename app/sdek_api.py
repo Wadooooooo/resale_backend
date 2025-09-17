@@ -118,3 +118,62 @@ async def create_sdek_delivery_order(order_data: dict, token: str):
             print(f"Ответ: {e.response.text}")
             print("!"*50 + "\n")
             raise HTTPException(status_code=400, detail=f"Ошибка от API СДЭК: {e.response.text}")
+
+async def create_sdek_return_order(shipment_details: dict, token: str):
+    """СОЗДАЕТ ЗАКАЗ В СДЭК ДЛЯ ВОЗВРАТА ПОСТАВЩИКУ."""
+    order_url = f"{SDEK_API_URL}/orders"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    total_declared_value = float(shipment_details['declared_value'])
+    item_count = len(shipment_details['items'])
+    
+    # Распределяем общую стоимость и вес равномерно по всем товарам в посылке
+    value_per_item = total_declared_value / item_count if item_count > 0 else 0
+    weight_per_item = shipment_details['package_dims']['weight'] // item_count if item_count > 0 else 0
+
+    package_items = []
+    for item in shipment_details['items']:
+        package_items.append({
+            "name": item['phone']['model']['name'],
+            "ware_key": str(item['phone']['id']),
+            "payment": {"value": value_per_item}, # Используем распределенную стоимость
+            "cost": value_per_item,
+            "weight": weight_per_item,
+            "amount": 1
+        })
+
+    # Формируем тело запроса
+    sdek_payload = {
+        "type": 1,
+        "tariff_code": 483, # Посылка склад-склад
+        "comment": f"Возврат брака по отправке №{shipment_details['shipment_id']}",
+        "sender": {
+            "name": "Садыков Владислав", # ВАШИ ДАННЫЕ КАК ОТПРАВИТЕЛЯ
+            "phones": [{"number": "+79010882523"}]
+        },
+        "from_location": {
+            "code": 270 # ВАШ ГОРОД (Оренбург)
+        },
+        "recipient": {
+            "name": shipment_details['supplier_name'], # ПОЛУЧАТЕЛЬ - ПОСТАВЩИК
+            "phones": [{"number": shipment_details['supplier_phone']}]
+        },
+        "to_location": {
+            "address": shipment_details['supplier_address'] # АДРЕС ПОСТАВЩИКА
+        },
+        "packages": [{
+            "number": f"RET-{shipment_details['shipment_id']}",
+            **shipment_details['package_dims'],
+            "items": package_items
+        }]
+    }
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(order_url, headers=headers, json=sdek_payload, timeout=20.0)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=400, detail=f"Ошибка от API СДЭК: {e.response.text}")
+    
+

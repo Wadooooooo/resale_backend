@@ -120,7 +120,7 @@ async def get_phones_for_inspection(db: AsyncSession):
 
 async def get_checklist_items(db: AsyncSession):
     """Получает все пункты из чек-листа."""
-    result = await db.execute(select(models.ChecklistItems))
+    result = await db.execute(select(models.ChecklistItems).order_by(models.ChecklistItems.display_order))
     return result.scalars().all()
 
 
@@ -2053,8 +2053,7 @@ async def delete_user(db: AsyncSession, user_id: int):
 
 async def get_sales_summary_for_user(db: AsyncSession, user_id: int):
     """Собирает сводку по продажам для пользователя за активную смену на основе движения денег."""
-    
-    # 1. Находим активную смену
+
     active_shift = await get_active_shift(db, user_id)
     if not active_shift:
         return {"sales_count": 0, "total_revenue": Decimal('0'), "cash_in_register": Decimal('0')}
@@ -2062,21 +2061,18 @@ async def get_sales_summary_for_user(db: AsyncSession, user_id: int):
     shift_start_time = active_shift.shift_start
     shift_end_time = datetime.now()
 
-    # 2. Считаем количество продаж (этот показатель не меняется)
     sales_count_res = await db.execute(
         select(func.count(models.Sales.id))
         .filter(models.Sales.user_id == user_id, models.Sales.sale_date.between(shift_start_time, shift_end_time))
     )
     sales_count = sales_count_res.scalar_one_or_none() or 0
 
-    # 3. Находим ID категорий "Продажа" и "Возврат"
     op_cat_res = await db.execute(
         select(models.OperationCategories.id, models.OperationCategories.name)
         .where(models.OperationCategories.name.in_(['Продажи на торг. точках', 'Возврат']))
     )
     op_cat_map = {r.name: r.id for r in op_cat_res.all()}
-    
-    # 4. Считаем общую выручку (сумма продаж минус сумма возвратов)
+
     revenue_query = select(func.coalesce(func.sum(models.CashFlow.amount), Decimal('0'))).where(
         models.CashFlow.user_id == user_id,
         models.CashFlow.date.between(shift_start_time, shift_end_time),
@@ -2084,18 +2080,29 @@ async def get_sales_summary_for_user(db: AsyncSession, user_id: int):
     )
     total_revenue = (await db.execute(revenue_query)).scalar_one()
 
-    # 5. Считаем наличные в кассе (все приходы и расходы по счету "Наличные")
+
+    # 1. Находим ID категорий, которые нужно ИГНОРИРОВАТЬ
+    transfer_categories_res = await db.execute(
+        select(models.OperationCategories.id)
+        .where(models.OperationCategories.name.in_(['Выбытие - Перевод между счетами', 'Поступление - Перевод между счетами']))
+    )
+    transfer_category_ids = transfer_categories_res.scalars().all()
+
+    # 2. Считаем наличные в кассе, ИСКЛЮЧАЯ переводы
     cash_account_res = await db.execute(select(models.Accounts.id).where(models.Accounts.name == 'Наличные'))
     cash_account_id = cash_account_res.scalar_one_or_none()
-    
+
     cash_in_register = Decimal('0')
     if cash_account_id:
         cash_query = select(func.coalesce(func.sum(models.CashFlow.amount), Decimal('0'))).where(
             models.CashFlow.user_id == user_id,
             models.CashFlow.date.between(shift_start_time, shift_end_time),
-            models.CashFlow.account_id == cash_account_id
+            models.CashFlow.account_id == cash_account_id,
+            # Новое условие: категория операции НЕ ДОЛЖНА БЫТЬ переводом
+            models.CashFlow.operation_categories_id.notin_(transfer_category_ids)
         )
         cash_in_register = (await db.execute(cash_query)).scalar_one()
+
 
     return {
         "sales_count": sales_count,
@@ -4028,12 +4035,11 @@ async def get_fast_moving_low_stock_accessories(db: AsyncSession, threshold: int
     
     return [{"accessory": acc, "total_quantity": qty} for acc, qty in result.all()]
 
-async def create_return_shipment(db: AsyncSession, shipment_data: schemas.ReturnShipmentCreate, user_id: int):
-    """Создает отправку брака поставщику и обновляет статусы телефонов."""
+async def create_return_shipment(db: AsyncSession, shipment_data: schemas.ReturnShipmentCreate, user_id: int) -> int:
+    """Создает отправку брака и возвращает ТОЛЬКО ЕЕ ID."""
+    # ... (весь код создания new_shipment, обновления телефонов и логов остается таким же)
     if not shipment_data.phone_ids:
         raise HTTPException(status_code=400, detail="Не выбраны телефоны для отправки.")
-
-    # Создаем саму отправку
     new_shipment = models.ReturnShipment(
         supplier_id=shipment_data.supplier_id,
         track_number=shipment_data.track_number,
@@ -4041,38 +4047,46 @@ async def create_return_shipment(db: AsyncSession, shipment_data: schemas.Return
     )
     db.add(new_shipment)
     await db.flush()
-
-    # Находим телефоны и привязываем их к отправке
-    phones_to_update_res = await db.execute(
-        select(models.Phones).filter(models.Phones.id.in_(shipment_data.phone_ids))
-    )
+    new_shipment_id = new_shipment.id
+    phones_to_update_res = await db.execute(select(models.Phones).filter(models.Phones.id.in_(shipment_data.phone_ids)))
     phones_to_update = phones_to_update_res.scalars().all()
-
     for phone in phones_to_update:
         if phone.technical_status != models.TechStatus.БРАК:
             raise HTTPException(status_code=400, detail=f"Телефон ID {phone.id} не является браком.")
-        
-        # Обновляем статус телефона
         phone.commercial_status = models.CommerceStatus.ОТПРАВЛЕН_ПОСТАВЩИКУ
-        
-        # Создаем элемент отправки
-        db.add(models.ReturnShipmentItem(shipment_id=new_shipment.id, phone_id=phone.id))
-        
-        # Создаем лог
-        log_details = f"Отправлен поставщику в составе отправки №{new_shipment.id}."
+        db.add(models.ReturnShipmentItem(shipment_id=new_shipment_id, phone_id=phone.id))
+        log_details = f"Отправлен поставщику в составе отправки №{new_shipment_id}."
         if shipment_data.track_number:
             log_details += f" Трек-номер: {shipment_data.track_number}"
-            
         db.add(models.PhoneMovementLog(
-            phone_id=phone.id,
-            user_id=user_id,
-            event_type=models.PhoneEventType.ОТПРАВЛЕН_ПОСТАВЩИКУ,
-            details=log_details
+            phone_id=phone.id, user_id=user_id,
+            event_type=models.PhoneEventType.ОТПРАВЛЕН_ПОСТАВЩИКУ, details=log_details
         ))
 
     await db.commit()
-    await db.refresh(new_shipment)
-    return new_shipment
+    # Просто возвращаем ID
+    return new_shipment_id
+
+async def get_return_shipment_by_id(db: AsyncSession, shipment_id: int):
+    """Получает одну отправку по ID со всеми 'жадно' загруженными данными."""
+    query = (
+        select(models.ReturnShipment)
+        .options(
+            selectinload(models.ReturnShipment.supplier),
+            selectinload(models.ReturnShipment.items).selectinload(models.ReturnShipmentItem.phone).options(
+                selectinload(models.Phones.model).options(
+                    selectinload(models.Models.model_name),
+                    selectinload(models.Models.storage),
+                    selectinload(models.Models.color)
+                ),
+                selectinload(models.Phones.model_number),
+                selectinload(models.Phones.supplier_order)
+            )
+        )
+        .filter(models.ReturnShipment.id == shipment_id)
+    )
+    result = await db.execute(query)
+    return result.scalars().unique().one_or_none()
 
 
 async def get_return_shipments(db: AsyncSession):
@@ -4086,11 +4100,29 @@ async def get_return_shipments(db: AsyncSession):
                     selectinload(models.Models.model_name),
                     selectinload(models.Models.storage),
                     selectinload(models.Models.color)
-                )
+                ),
+                selectinload(models.Phones.model_number),
+                selectinload(models.Phones.supplier_order)
             )
         )
         .order_by(models.ReturnShipment.id.desc())
     )
     result = await db.execute(query)
     return result.scalars().unique().all()
+
+async def update_return_shipment_with_sdek_info(db: AsyncSession, shipment_id: int, sdek_uuid: str, track_number: str):
+    """Обновляет отправку, добавляя информацию из СДЭК."""
+    shipment = await db.get(models.ReturnShipment, shipment_id)
+    if not shipment:
+        raise HTTPException(status_code=404, detail="Отправка не найдена")
+    
+    shipment.sdek_order_uuid = sdek_uuid
+    shipment.sdek_track_number = track_number
+    # Можно также обновить внутренний трек-номер, если он не был задан
+    if not shipment.track_number:
+        shipment.track_number = track_number
+        
+    await db.commit()
+    await db.refresh(shipment)
+    return shipment
 
