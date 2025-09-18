@@ -34,3 +34,4 @@ apscheduler==3.10.4
 aiogram==3.10.0
 dotenv
 aiohttp
+httpx
