@@ -2864,32 +2864,40 @@ async def create_sdek_order_for_supplier_order(
     db: AsyncSession = Depends(get_db),
     current_user: models.Users = Depends(security.get_current_active_user)
 ):
+    # 1. Проверяем, что заказ существует (без изменений)
     order = await db.get(models.SupplierOrders, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Заказ у поставщика не найден")
 
+    # 2. Отправляем запрос в СДЭК (без изменений)
     token = await sdek_api.get_sdek_token()
-
     full_sdek_data = sdek_data.model_dump()
     full_sdek_data['supplier_order_id'] = order_id
     full_sdek_data['to_location_address'] = "г. Оренбург, ул. Рокоссовского, 25"
     sdek_response = await sdek_api.create_sdek_delivery_order(full_sdek_data, token)
-    
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Получаем данные напрямую из ответа СДЭК
+
+    # --- VVV НАЧАЛО ИЗМЕНЕНИЙ VVV ---
+
+    # 3. Извлекаем ВСЕ нужные данные из ответа СДЭК
     sdek_entity = sdek_response.get('entity', {})
     sdek_uuid = sdek_entity.get('uuid')
     sdek_track_number = sdek_entity.get('cdek_number')
-    
-    # Сохраняем их в наш объект заказа в БД
-    order.sdek_order_uuid = sdek_uuid
-    order.sdek_track_number = sdek_track_number
 
-    await db.commit()
-    # Мы больше не будем использовать db.refresh(order), так как он не работает стабильно
+    # Извлекаем начальный статус
+    initial_status = "Создан" # Значение по умолчанию
+    if sdek_entity.get('statuses'):
+        initial_status = sdek_entity['statuses'][0].get('name', 'Создан')
 
-    # Возвращаем на фронтенд те данные, что мы только что получили,
-    # а не пытаемся их снова прочитать из нестабильного объекта 'order'.
+    # 4. Вызываем новую CRUD-функцию для надежного сохранения
+    await crud.update_supplier_order_with_sdek_info(
+        db=db,
+        order_id=order_id,
+        sdek_uuid=sdek_uuid,
+        track_number=sdek_track_number,
+        status=initial_status
+    )
+
+    # 5. Возвращаем ответ на фронтенд (без изменений)
     return {
         "message": "Заказ в СДЭК успешно создан!", 
         "track_number": sdek_track_number, 

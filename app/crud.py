@@ -4192,3 +4192,22 @@ async def check_and_update_sdek_statuses(db: AsyncSession):
     await db.commit()
     print(f"Планировщик: Проверка {len(items_to_check)} заказов СДЭК завершена.")
 
+async def update_supplier_order_with_sdek_info(
+    db: AsyncSession, 
+    order_id: int, 
+    sdek_uuid: str, 
+    track_number: str, 
+    status: str
+):
+    """Надежно обновляет заказ данными от СДЭК."""
+    stmt = (
+        update(models.SupplierOrders)
+        .where(models.SupplierOrders.id == order_id)
+        .values(
+            sdek_order_uuid=sdek_uuid,
+            sdek_track_number=track_number,
+            sdek_status=status
+        )
+    )
+    await db.execute(stmt)
+    await db.commit()

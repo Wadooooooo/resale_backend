@@ -4,7 +4,7 @@ import os
 from fastapi import HTTPException
 import json
 
-SDEK_API_URL = "https://api.edu.cdek.ru/v2" # Тестовый контур
+SDEK_API_URL = "https://api.cdek.ru/v2" # Тестовый контур
 CLIENT_ID = os.getenv("SDEK_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SDEK_CLIENT_SECRET")
 
