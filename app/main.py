@@ -2921,3 +2921,17 @@ async def suggest_address(
             return response.json()
         except httpx.HTTPStatusError as e:
             raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+
+async def scheduled_sdek_check():
+    """Создает сессию БД и запускает проверку статусов СДЭК."""
+    async with AsyncSessionLocal() as session:
+        await crud.check_and_update_sdek_statuses(session)
+
+# Внутри функции startup_event (если ее нет, создайте)
+@app.on_event("startup")
+async def startup_event():
+    scheduler.add_job(scheduled_sdek_check, 'interval', minutes=30)
+
+    # Запускаем планировщик
+    scheduler.start()
+    print("Планировщик задач запущен.")

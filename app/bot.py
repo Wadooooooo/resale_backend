@@ -60,6 +60,20 @@ async def who_am_i(message: Message):
     else:
         await message.answer(f"❌ Не могу найти пользователя с Telegram ID {user_id_to_check} в базе данных, к которой я подключен.")
 
+TELEGRAM_SDEK_CHAT_ID = os.getenv("TELEGRAM_SDEK_CHAT_ID")
+
+async def send_sdek_status_update(message: str):
+    """Отправляет сообщение с обновлением статуса СДЭК в специальный чат."""
+    if not TELEGRAM_SDEK_CHAT_ID:
+        print("Переменная TELEGRAM_SDEK_CHAT_ID не установлена. Уведомление не отправлено.")
+        return
+    try:
+        # Используем parse_mode="HTML" для форматирования
+        await bot.send_message(chat_id=TELEGRAM_SDEK_CHAT_ID, text=message, parse_mode="HTML")
+    except Exception as e:
+        print(f"Ошибка при отправке уведомления в Telegram: {e}")
+
+
 # --- ЛОГИКА ОПЛАТЫ (МАШИНА СОСТОЯНИЙ) ---
 class Payment(StatesGroup):
     waiting_for_amount = State()

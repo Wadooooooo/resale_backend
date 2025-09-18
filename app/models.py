@@ -125,6 +125,7 @@ class SupplierOrders(Base):
     delivery_payment_status: Mapped[Optional[OrderPaymentStatus]] = mapped_column(Enum(OrderPaymentStatus, native_enum=False), default=OrderPaymentStatus.НЕ_ОПЛАЧЕН, nullable=False)
     sdek_order_uuid: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     sdek_track_number: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    sdek_status: Mapped[Optional[str]] = mapped_column(String(255), nullable=True) 
 
     supplier: Mapped[Optional["Supplier"]] = relationship("Supplier", back_populates="supplier_orders")
     phones: Mapped[List["Phones"]] = relationship("Phones", back_populates="supplier_order")
@@ -1012,7 +1013,8 @@ class ReturnShipment(Base):
     status: Mapped[str] = mapped_column(String(50), default="В сборке") # Например: В сборке, Отправлен, Завершен
     sdek_order_uuid: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     sdek_track_number: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-
+    sdek_status: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    
     supplier: Mapped["Supplier"] = relationship("Supplier")
     items: Mapped[List["ReturnShipmentItem"]] = relationship("ReturnShipmentItem", back_populates="shipment")
 

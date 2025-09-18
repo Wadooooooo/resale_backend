@@ -17,6 +17,8 @@ from typing import List, Optional
 from sqlalchemy import update
 from . import security
 from sqlalchemy import extract
+from .bot import send_sdek_status_update
+from . import sdek_api
 
 
 BATTERY_THRESHOLDS = {
@@ -4125,4 +4127,68 @@ async def update_return_shipment_with_sdek_info(db: AsyncSession, shipment_id: i
     await db.commit()
     await db.refresh(shipment)
     return shipment
+
+async def check_and_update_sdek_statuses(db: AsyncSession):
+    """Проверяет статусы заказов СДЭК и отправляет уведомления."""
+    print("Планировщик: Запущена проверка статусов СДЭК...")
+    
+    # 1. Собираем все заказы и отправки, которые нужно проверить
+    orders_to_check_res = await db.execute(
+        select(models.SupplierOrders).where(
+            models.SupplierOrders.sdek_order_uuid.is_not(None),
+            models.SupplierOrders.sdek_status.notin_(['Вручен', 'Не вручен'])
+        )
+    )
+    shipments_to_check_res = await db.execute(
+        select(models.ReturnShipment).where(
+            models.ReturnShipment.sdek_order_uuid.is_not(None),
+            models.ReturnShipment.sdek_status.notin_(['Вручен', 'Не вручен'])
+        )
+    )
+    items_to_check = orders_to_check_res.scalars().all() + shipments_to_check_res.scalars().all()
+
+    if not items_to_check:
+        print("Планировщик: Активных заказов СДЭК для проверки не найдено.")
+        return
+
+    # 2. Получаем токен СДЭК один раз на всю проверку
+    try:
+        token = await sdek_api.get_sdek_token()
+    except Exception as e:
+        print(f"Планировщик: Не удалось получить токен СДЭК. Ошибка: {e}")
+        return
+
+    # 3. Проверяем каждый заказ/отправку
+    for item in items_to_check:
+        sdek_info = await sdek_api.get_sdek_order_info(item.sdek_order_uuid, token)
+        
+        if sdek_info and sdek_info.get('entity'):
+            sdek_entity = sdek_info['entity']
+            statuses = sdek_entity.get('statuses', [])
+            if not statuses: continue
+            
+            # Берем самый последний статус из истории
+            latest_status_obj = statuses[-1]
+            new_status_name = latest_status_obj.get('name')
+            
+            if new_status_name and new_status_name != item.sdek_status:
+                old_status = item.sdek_status or "<i>(неизвестно)</i>"
+                item.sdek_status = new_status_name
+                
+                # Определяем, что это - заказ или возврат
+                if isinstance(item, models.SupplierOrders):
+                    message_header = f"<b>🚚 Заказ от поставщика №{item.id}</b>"
+                else:
+                    message_header = f"<b>↩️ Возврат поставщику №{item.id}</b>"
+                
+                # Формируем и отправляем сообщение
+                message = (
+                    f"{message_header}\n"
+                    f"Трек-номер: <code>{item.sdek_track_number}</code>\n"
+                    f"Статус изменен: {old_status} ➡️ <b>{new_status_name}</b>"
+                )
+                await send_sdek_status_update(message)
+
+    await db.commit()
+    print(f"Планировщик: Проверка {len(items_to_check)} заказов СДЭК завершена.")
 

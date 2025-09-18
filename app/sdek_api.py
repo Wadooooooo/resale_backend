@@ -177,3 +177,17 @@ async def create_sdek_return_order(shipment_details: dict, token: str):
             raise HTTPException(status_code=400, detail=f"Ошибка от API СДЭК: {e.response.text}")
     
 
+async def get_sdek_order_info(uuid: str, token: str):
+    """Получает информацию о заказе по его UUID."""
+    info_url = f"{SDEK_API_URL}/orders/{uuid}"
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(info_url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            # Не бросаем ошибку, а возвращаем None, чтобы планировщик не останавливался
+            print(f"SDEK Info Error for UUID {uuid}: {e.response.text}")
+            return None
+
