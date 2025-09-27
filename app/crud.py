@@ -779,19 +779,27 @@ async def get_phones_ready_for_stock(db: AsyncSession):
     return result.scalars().unique().all()
 
 async def accept_phones_to_warehouse(db: AsyncSession, data: schemas.WarehouseAcceptanceRequest, user_id: int):
-    # Эта функция теперь просто выполняет свою работу и ничего не возвращает
+    # Эта версия принудительно загружает всю необходимую информацию о модели
+    # для ВСЕХ телефонов в списке, а не только для новых.
     phones_to_update_result = await db.execute(
-        select(models.Phones).filter(models.Phones.id.in_(data.phone_ids))
-        .options(selectinload(models.Phones.model))
+        select(models.Phones)
+        .options(
+            selectinload(models.Phones.model).options(
+                selectinload(models.Models.model_name),
+                selectinload(models.Models.storage),
+                selectinload(models.Models.color)
+            )
+        )
+        .filter(models.Phones.id.in_(data.phone_ids))
     )
-    phones_to_update = phones_to_update_result.scalars().all()
-    
+    phones_to_update = phones_to_update_result.scalars().unique().all()
+
     shop = await db.get(models.Shops, data.shop_id)
     shop_name = shop.name if shop else "Неизвестный магазин"
-    
+
     for phone in phones_to_update:
         phone.commercial_status = models.CommerceStatus.НА_СКЛАДЕ
-        
+
         db.add(models.Warehouse(
             product_type_id=1, product_id=phone.id, quantity=1, shop_id=data.shop_id,
             storage_location=models.EnumShop.СКЛАД, added_date=datetime.now(), user_id=user_id
@@ -801,13 +809,14 @@ async def accept_phones_to_warehouse(db: AsyncSession, data: schemas.WarehouseAc
             details=f"Принят на склад магазина '{shop_name}'."
         ))
 
+        # Этот блок теперь будет работать для ЛЮБОГО телефона, так как данные загружены
         if phone.model:
             waiting_list_query = select(models.WaitingList).where(
                 models.WaitingList.model_id == phone.model.id,
                 models.WaitingList.status == 0
             )
             waiting_list_results = await db.execute(waiting_list_query)
-            
+
             for entry in waiting_list_results.scalars().all():
                 model_name_base = phone.model.model_name.name if phone.model.model_name else ""
                 storage_display = models.format_storage_for_display(phone.model.storage.storage) if phone.model.storage else ""
@@ -820,7 +829,7 @@ async def accept_phones_to_warehouse(db: AsyncSession, data: schemas.WarehouseAc
                 )
                 await create_notification(db, user_id=entry.user_id, message=message, waiting_list_id=entry.id)
                 entry.status = 1
-    
+
     await db.commit()
 
 
@@ -4131,66 +4140,84 @@ async def update_return_shipment_with_sdek_info(db: AsyncSession, shipment_id: i
 async def check_and_update_sdek_statuses(db: AsyncSession):
     """Проверяет статусы заказов СДЭК и отправляет уведомления."""
     print("Планировщик: Запущена проверка статусов СДЭК...")
-    
-    # 1. Собираем все заказы и отправки, которые нужно проверить
+
+    # --- VVV НАЧАЛО ИЗМЕНЕНИЙ VVV ---
+
+    # Условие для поиска незавершенных заказов
+    # Теперь оно включает заказы, где статус еще не установлен (NULL)
+    unfinished_statuses = ['Вручен', 'Не вручен']
+
+    # Собираем заказы от поставщиков для проверки
     orders_to_check_res = await db.execute(
         select(models.SupplierOrders).where(
             models.SupplierOrders.sdek_order_uuid.is_not(None),
-            models.SupplierOrders.sdek_status.notin_(['Вручен', 'Не вручен'])
+            or_(
+                models.SupplierOrders.sdek_status.notin_(unfinished_statuses),
+                models.SupplierOrders.sdek_status.is_(None)
+            )
         )
     )
+    # Собираем возвраты поставщикам для проверки
     shipments_to_check_res = await db.execute(
         select(models.ReturnShipment).where(
             models.ReturnShipment.sdek_order_uuid.is_not(None),
-            models.ReturnShipment.sdek_status.notin_(['Вручен', 'Не вручен'])
+            or_(
+                models.ReturnShipment.sdek_status.notin_(unfinished_statuses),
+                models.ReturnShipment.sdek_status.is_(None)
+            )
         )
     )
+    # --- ^^^ КОНЕЦ ИЗМЕНЕНИЙ ^^^ ---
+
     items_to_check = orders_to_check_res.scalars().all() + shipments_to_check_res.scalars().all()
 
     if not items_to_check:
         print("Планировщик: Активных заказов СДЭК для проверки не найдено.")
         return
 
-    # 2. Получаем токен СДЭК один раз на всю проверку
     try:
         token = await sdek_api.get_sdek_token()
     except Exception as e:
         print(f"Планировщик: Не удалось получить токен СДЭК. Ошибка: {e}")
         return
 
-    # 3. Проверяем каждый заказ/отправку
     for item in items_to_check:
         sdek_info = await sdek_api.get_sdek_order_info(item.sdek_order_uuid, token)
-        
+
         if sdek_info and sdek_info.get('entity'):
             sdek_entity = sdek_info['entity']
+
+            # Обновляем трек-номер, если его еще нет
+            new_track_number = sdek_entity.get('cdek_number')
+            if new_track_number and not item.sdek_track_number:
+                item.sdek_track_number = new_track_number
+
+            # Обновляем статус
             statuses = sdek_entity.get('statuses', [])
             if not statuses: continue
-            
-            # Берем самый последний статус из истории
+
             latest_status_obj = statuses[-1]
             new_status_name = latest_status_obj.get('name')
-            
+
             if new_status_name and new_status_name != item.sdek_status:
                 old_status = item.sdek_status or "<i>(неизвестно)</i>"
                 item.sdek_status = new_status_name
-                
-                # Определяем, что это - заказ или возврат
+
                 if isinstance(item, models.SupplierOrders):
                     message_header = f"<b>🚚 Заказ от поставщика №{item.id}</b>"
                 else:
                     message_header = f"<b>↩️ Возврат поставщику №{item.id}</b>"
-                
-                # Формируем и отправляем сообщение
+
                 message = (
                     f"{message_header}\n"
-                    f"Трек-номер: <code>{item.sdek_track_number}</code>\n"
+                    f"Трек-номер: <code>{item.sdek_track_number or 'еще не присвоен'}</code>\n"
                     f"Статус изменен: {old_status} ➡️ <b>{new_status_name}</b>"
                 )
                 await send_sdek_status_update(message)
 
     await db.commit()
     print(f"Планировщик: Проверка {len(items_to_check)} заказов СДЭК завершена.")
+
 
 async def update_supplier_order_with_sdek_info(
     db: AsyncSession, 

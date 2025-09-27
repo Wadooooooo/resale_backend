@@ -1063,10 +1063,6 @@ async def edit_supplier(
 
 # --- Эндпоинты для Заказов у Поставщиков ---
 
-# app/main.py
-
-# app/main.py
-
 @app.post("/api/v1/supplier-orders", response_model=schemas.SupplierOrder, tags=["Supplier Orders"], dependencies=[Depends(security.require_permission("manage_inventory"))])
 async def create_new_supplier_order(
     order: schemas.SupplierOrderCreate,
@@ -1269,6 +1265,37 @@ async def receive_order(
         payment_status=formatted_payment_status,
         details=formatted_details
     )
+
+@app.get("/api/v1/supplier-orders/{order_id}/sdek-status", tags=["Supplier Orders"])
+async def refresh_sdek_status_for_order(
+    order_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Принудительно запрашивает и обновляет статус заказа СДЭК."""
+    order = await db.get(models.SupplierOrders, order_id)
+    if not order or not order.sdek_order_uuid:
+        raise HTTPException(status_code=404, detail="Заказ с UUID от СДЭК не найден")
+
+    token = await sdek_api.get_sdek_token()
+    sdek_info = await sdek_api.get_sdek_order_info(order.sdek_order_uuid, token)
+
+    if sdek_info and sdek_info.get('entity'):
+        sdek_entity = sdek_info['entity']
+
+        # Извлекаем новые данные
+        new_track_number = sdek_entity.get('cdek_number')
+        new_status = order.sdek_status
+        if sdek_entity.get('statuses'):
+            new_status = sdek_entity['statuses'][-1].get('name')
+
+        # Обновляем, если есть что обновлять
+        if new_track_number and new_track_number != order.sdek_track_number or new_status != order.sdek_status:
+            order.sdek_track_number = new_track_number
+            order.sdek_status = new_status
+            await db.commit()
+
+    # Возвращаем обновленные данные
+    return {"sdek_track_number": order.sdek_track_number, "sdek_status": order.sdek_status}
 
 
 @app.get("/api/v1/shops", response_model=List[schemas.Shop], tags=["Warehouse"], dependencies=[Depends(security.require_any_permission("manage_inventory", "perform_sales"))])
