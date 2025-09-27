@@ -31,7 +31,7 @@ async def calculate_sdek_delivery_cost(calculation_data: dict, token: str):
 
     # Формируем тело запроса для калькулятора
     calculator_payload = {
-        "tariff_code": 483, # Ваш тариф "Посылка склад-склад"
+        "tariff_code": 136, # Ваш тариф "Посылка склад-склад"
         "from_location": {
             "address": calculation_data['from_location_address']
         },
@@ -73,7 +73,7 @@ async def create_sdek_delivery_order(order_data: dict, token: str):
 
     sdek_payload = {
         "type": 1,
-        "tariff_code": 483, # Тариф "Посылка склад-склад"
+        "tariff_code": 136, # Тариф "Посылка склад-склад"
         "comment": f"Заказ от поставщика № {order_data['supplier_order_id']}",
         
         # Указываем код ПВЗ, куда нужно доставить
@@ -145,11 +145,11 @@ async def create_sdek_return_order(shipment_details: dict, token: str):
     # Формируем тело запроса
     sdek_payload = {
         "type": 1,
-        "tariff_code": 483, # Посылка склад-склад
+        "tariff_code": 136, # Посылка склад-склад
         "comment": f"Возврат брака по отправке №{shipment_details['shipment_id']}",
         "sender": {
-            "name": "Садыков Владислав", # ВАШИ ДАННЫЕ КАК ОТПРАВИТЕЛЯ
-            "phones": [{"number": "+79010882523"}]
+            "name": "Садыков Роман", # ВАШИ ДАННЫЕ КАК ОТПРАВИТЕЛЯ
+            "phones": [{"number": "+79228758950"}]
         },
         "from_location": {
             "code": 270 # ВАШ ГОРОД (Оренбург)

@@ -252,15 +252,15 @@ app.add_middleware(
 )
 
 def _format_phone_response(phone: models.Phones) -> schemas.Phone:
-    """Форматирует объект телефона из БД в Pydantic-схему для ответа API."""
-
-    # --- ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ ---
-    # Проверяем, что связанные объекты существуют, прежде чем их использовать
+    """
+    НАДЕЖНАЯ и ПОЛНАЯ функция форматирования.
+    Безопасно собирает все данные о телефоне.
+    """
     model_detail_schema = None
-    if phone.model:
-        model_name_base = phone.model.model_name.name if phone.model.model_name else ""
-        storage_display = models.format_storage_for_display(phone.model.storage.storage) if phone.model.storage else ""
-        color_name = phone.model.color.color_name if phone.model.color else ""
+    if hasattr(phone, 'model') and phone.model and phone.model.model_name and phone.model.storage and phone.model.color:
+        model_name_base = phone.model.model_name.name
+        storage_display = models.format_storage_for_display(phone.model.storage.storage)
+        color_name = phone.model.color.color_name
         full_display_name = " ".join(part for part in [model_name_base, storage_display, color_name] if part)
 
         model_detail_schema = schemas.ModelDetail(
@@ -273,25 +273,20 @@ def _format_phone_response(phone: models.Phones) -> schemas.Phone:
             image_url=phone.model.image_url
         )
 
-    model_number_schema = schemas.ModelNumber.from_orm(phone.model_number) if phone.model_number else None
-    location = getattr(phone, 'storage_location', None)
-    defect_reason = getattr(phone, 'defect_reason', None)
-
+    model_number_schema = schemas.ModelNumber.from_orm(phone.model_number) if hasattr(phone, 'model_number') and phone.model_number else None
+    
     return schemas.Phone(
         id=phone.id,
-        serial_number=phone.serial_number,
-        technical_status=phone.technical_status.value if phone.technical_status else None,
-        commercial_status=phone.commercial_status.value if phone.commercial_status else None,
-        condition=phone.condition.value if phone.condition else None,
-        model_id=phone.model_id,
-        model_number_id=phone.model_number_id,
-        supplier_order_id=phone.supplier_order_id,
-        added_date=phone.added_date,
+        serial_number=getattr(phone, 'serial_number', None),
+        purchase_price=getattr(phone, 'purchase_price', None),
+        technical_status=phone.technical_status.value if getattr(phone, 'technical_status', None) else None,
+        commercial_status=phone.commercial_status.value if getattr(phone, 'commercial_status', None) else None,
+        condition=phone.condition.value if getattr(phone, 'condition', None) else None,
         model=model_detail_schema,
         model_number=model_number_schema,
-        supplier_order=phone.supplier_order,
-        storage_location=location,
-        defect_reason=defect_reason
+        added_date=getattr(phone, 'added_date', None), # <-- ВОТ ЭТО ПОЛЕ Я ПРОПУСТИЛ
+        storage_location=getattr(phone, 'storage_location', None),
+        defect_reason=getattr(phone, 'defect_reason', None)
     )
 
 

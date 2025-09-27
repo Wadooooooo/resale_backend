@@ -4141,13 +4141,8 @@ async def check_and_update_sdek_statuses(db: AsyncSession):
     """Проверяет статусы заказов СДЭК и отправляет уведомления."""
     print("Планировщик: Запущена проверка статусов СДЭК...")
 
-    # --- VVV НАЧАЛО ИЗМЕНЕНИЙ VVV ---
-
-    # Условие для поиска незавершенных заказов
-    # Теперь оно включает заказы, где статус еще не установлен (NULL)
     unfinished_statuses = ['Вручен', 'Не вручен']
 
-    # Собираем заказы от поставщиков для проверки
     orders_to_check_res = await db.execute(
         select(models.SupplierOrders).where(
             models.SupplierOrders.sdek_order_uuid.is_not(None),
@@ -4157,7 +4152,6 @@ async def check_and_update_sdek_statuses(db: AsyncSession):
             )
         )
     )
-    # Собираем возвраты поставщикам для проверки
     shipments_to_check_res = await db.execute(
         select(models.ReturnShipment).where(
             models.ReturnShipment.sdek_order_uuid.is_not(None),
@@ -4167,8 +4161,6 @@ async def check_and_update_sdek_statuses(db: AsyncSession):
             )
         )
     )
-    # --- ^^^ КОНЕЦ ИЗМЕНЕНИЙ ^^^ ---
-
     items_to_check = orders_to_check_res.scalars().all() + shipments_to_check_res.scalars().all()
 
     if not items_to_check:
@@ -4187,33 +4179,37 @@ async def check_and_update_sdek_statuses(db: AsyncSession):
         if sdek_info and sdek_info.get('entity'):
             sdek_entity = sdek_info['entity']
 
-            # Обновляем трек-номер, если его еще нет
+            # --- VVV НАЧАЛО ИСПРАВЛЕНИЙ VVV ---
+
             new_track_number = sdek_entity.get('cdek_number')
-            if new_track_number and not item.sdek_track_number:
+            new_status_name = None
+            statuses = sdek_entity.get('statuses', [])
+            if statuses:
+                new_status_name = statuses[-1].get('name')
+
+            # Если трек-номер появился, а статуса все еще нет, ставим статус по умолчанию
+            if new_track_number and not item.sdek_status:
+                item.sdek_status = "Зарегистрирован"
+
+            status_has_changed = new_status_name and new_status_name != item.sdek_status
+
+            if new_track_number:
                 item.sdek_track_number = new_track_number
 
-            # Обновляем статус
-            statuses = sdek_entity.get('statuses', [])
-            if not statuses: continue
-
-            latest_status_obj = statuses[-1]
-            new_status_name = latest_status_obj.get('name')
-
-            if new_status_name and new_status_name != item.sdek_status:
-                old_status = item.sdek_status or "<i>(неизвестно)</i>"
+            if new_status_name:
+                old_status = item.sdek_status or "<i>(еще не было)</i>"
                 item.sdek_status = new_status_name
 
-                if isinstance(item, models.SupplierOrders):
-                    message_header = f"<b>🚚 Заказ от поставщика №{item.id}</b>"
-                else:
-                    message_header = f"<b>↩️ Возврат поставщику №{item.id}</b>"
-
+            if status_has_changed:
+                message_header = f"<b>🚚 Заказ от поставщика №{item.id}</b>" if isinstance(item, models.SupplierOrders) else f"<b>↩️ Возврат поставщику №{item.id}</b>"
                 message = (
                     f"{message_header}\n"
-                    f"Трек-номер: <code>{item.sdek_track_number or 'еще не присвоен'}</code>\n"
+                    f"Трек-номер: <code>{item.sdek_track_number or '...'}</code>\n"
                     f"Статус изменен: {old_status} ➡️ <b>{new_status_name}</b>"
                 )
                 await send_sdek_status_update(message)
+
+            # --- ^^^ КОНЕЦ ИСПРАВЛЕНИЙ ^^^ ---
 
     await db.commit()
     print(f"Планировщик: Проверка {len(items_to_check)} заказов СДЭК завершена.")
