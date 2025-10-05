@@ -1283,6 +1283,7 @@ async def get_profit_report(db: AsyncSession, start_date: date, end_date: date) 
         .filter(models.CashFlow.date < end_date_inclusive)
         .filter(models.OperationCategories.type == 'expense')
         .filter(models.OperationCategories.view != 'Техническая операция')
+        .filter(models.OperationCategories.name != 'Закупка товара')
     )
     total_expenses = expenses_result.scalar_one_or_none() or Decimal('0')
 
@@ -1426,57 +1427,72 @@ async def get_phone_history_by_serial(db: AsyncSession, serial_number: str):
 
 async def get_defective_phones(db: AsyncSession):
     """Получает телефоны со статусом 'БРАК' с последней записью в логе как причиной."""
+
+    # --- VVV НАЧАЛО ИЗМЕНЕНИЙ VVV ---
+
+    # 1. Создаем выражение для кастомной сортировки моделей
+    model_sort_order = case(
+        (models.ModelName.name.like('%iPhone 5%'), 5),
+        (models.ModelName.name.like('%iPhone 6%'), 6),
+        (models.ModelName.name.like('%iPhone 7%'), 7),
+        (models.ModelName.name.like('%iPhone 8%'), 8),
+        (models.ModelName.name.like('%iPhone X%'), 10),
+        (models.ModelName.name.like('%iPhone 11%'), 11),
+        (models.ModelName.name.like('%iPhone 12%'), 12),
+        (models.ModelName.name.like('%iPhone 13%'), 13),
+        (models.ModelName.name.like('%iPhone 14%'), 14),
+        (models.ModelName.name.like('%iPhone 15%'), 15),
+        else_=99
+    ).asc()
+
+    # 2. Обновляем основной запрос, добавляя join и сортировку
     query = (
         select(models.Phones)
+        .join(models.Phones.model)
+        .join(models.Models.model_name)
         .options(
-            selectinload(models.Phones.model).selectinload(models.Models.model_name),
-            selectinload(models.Phones.model).selectinload(models.Models.storage),
-            selectinload(models.Phones.model).selectinload(models.Models.color),
+            selectinload(models.Phones.model).options(
+                selectinload(models.Models.model_name),
+                selectinload(models.Models.storage),
+                selectinload(models.Models.color)
+            ),
             selectinload(models.Phones.model_number),
             selectinload(models.Phones.supplier_order),
-            selectinload(models.Phones.repairs).options(
-                selectinload(models.Repairs.loaner_logs).options(
-                    selectinload(models.LoanerLog.loaner_phone).options(
-                        selectinload(models.Phones.model).selectinload(models.Models.model_name)
-                    )
-                )
-            ),
-            selectinload(models.Phones.movement_logs) # Загружаем логи
+            selectinload(models.Phones.movement_logs)
         )
         .filter(models.Phones.technical_status == models.TechStatus.БРАК)
-        .filter(models.Phones.commercial_status != models.CommerceStatus.ОТПРАВЛЕН_ПОСТАВЩИКУ)
-        .filter(models.Phones.commercial_status != models.CommerceStatus.СПИСАН_ПОСТАВЩИКОМ)
-        
+        .filter(models.Phones.commercial_status.notin_([
+            models.CommerceStatus.ОТПРАВЛЕН_ПОСТАВЩИКУ,
+            models.CommerceStatus.СПИСАН_ПОСТАВЩИКОМ
+        ]))
+        .order_by(model_sort_order, models.ModelName.name.asc()) # <-- Применяем сортировку
     )
-    result = await db.execute(query)
-    phones = result.scalars().unique().all() # Используем unique() для корректной сборки
 
+    # --- ^^^ КОНЕЦ ИЗМЕНЕНИЙ ^^^ ---
+
+    result = await db.execute(query)
+    phones = result.scalars().unique().all()
+
+    # Логика извлечения причины брака остается без изменений
     for phone in phones:
         defect_log = None
-        # Сортируем логи, чтобы проверить самые свежие первыми
         sorted_logs = sorted(phone.movement_logs, key=lambda log: log.timestamp, reverse=True)
-        
-        # Ищем последнюю запись, которая является причиной брака
-        for phone in phones:
-            defect_log = None
-            sorted_logs = sorted(phone.movement_logs, key=lambda log: log.timestamp, reverse=True)
 
-            for log in sorted_logs:
-                if log.event_type in [
-                    models.PhoneEventType.ОБНАРУЖЕН_БРАК,
-                    models.PhoneEventType.ВОЗВРАТ_ОТ_КЛИЕНТА,
-                    models.PhoneEventType.ОБМЕНЕН
-                ]:
-                    defect_log = log
-                    break
+        for log in sorted_logs:
+            if log.event_type in [
+                models.PhoneEventType.ОБНАРУЖЕН_БРАК,
+                models.PhoneEventType.ВОЗВРАТ_ОТ_КЛИЕНТА,
+                models.PhoneEventType.ОБМЕНЕН
+            ]:
+                defect_log = log
+                break
 
-            if defect_log and defect_log.details:
-                # VVV ИЗМЕНЕНИЕ ЗДЕСЬ VVV
-                phone.defect_reason = _extract_specific_defect_reason(defect_log.details)
-            elif defect_log:
-                phone.defect_reason = defect_log.event_type.value
-            else:
-                phone.defect_reason = "Изначальная причина не найдена"
+        if defect_log and defect_log.details:
+            phone.defect_reason = _extract_specific_defect_reason(defect_log.details)
+        elif defect_log:
+            phone.defect_reason = log.event_type.value
+        else:
+            phone.defect_reason = "Причина не определена"
     return phones
 
 async def get_phones_sent_to_supplier(db: AsyncSession):
@@ -2144,23 +2160,45 @@ async def get_recent_phones_in_stock(db: AsyncSession):
 
 async def get_grouped_phones_in_stock(db: AsyncSession):
     """
-    Gets a grouped list of phone models in stock, counting their quantity and including model numbers.
+    Gets a grouped list of phone models in stock.
+    Uses a subquery to only consider the latest warehouse entry for each phone.
     """
+
+    # --- VVV НАЧАЛО ИЗМЕНЕНИЙ VVV ---
+
+    # 1. Подзапрос, который находит самую последнюю складскую запись для каждого телефона.
+    latest_warehouse_sq = (
+        select(
+            models.Warehouse.product_id,
+            models.Warehouse.storage_location,
+            func.row_number().over(
+                partition_by=models.Warehouse.product_id,
+                order_by=models.Warehouse.id.desc()
+            ).label("row_num")
+        )
+        .where(models.Warehouse.product_type_id == 1)
+    ).subquery()
+
+    # 2. Основной запрос теперь присоединяется к подзапросу и берет только строки, где row_num = 1.
     group_query = (
         select(
             models.Phones.model_id,
             func.count(models.Phones.id).label("quantity"),
             func.array_agg(models.ModelNumber.name).label("model_numbers")
         )
-        .join(models.Warehouse, (models.Phones.id == models.Warehouse.product_id) & (models.Warehouse.product_type_id == 1))
-        .join(models.ModelNumber, models.Phones.model_number_id == models.ModelNumber.id)
+        .join(latest_warehouse_sq, models.Phones.id == latest_warehouse_sq.c.product_id)
+        .join(models.ModelNumber, models.Phones.model_number_id == models.ModelNumber.id, isouter=True) # isouter=True на случай, если номера нет
         .where(
+            latest_warehouse_sq.c.row_num == 1, # <-- Ключевой фильтр
             models.Phones.commercial_status == models.CommerceStatus.НА_СКЛАДЕ,
-            models.Warehouse.storage_location != models.EnumShop.ПОДМЕННЫЙ_ФОНД,
+            latest_warehouse_sq.c.storage_location != models.EnumShop.ПОДМЕННЫЙ_ФОНД,
             models.Phones.model_id.is_not(None)
         )
         .group_by(models.Phones.model_id)
     )
+
+    # --- ^^^ КОНЕЦ ИЗМЕНЕНИЙ ^^^ ---
+
     grouped_result = await db.execute(group_query)
     grouped_phones = grouped_result.all()
 
@@ -2168,7 +2206,7 @@ async def get_grouped_phones_in_stock(db: AsyncSession):
         return []
 
     model_ids = [item.model_id for item in grouped_phones]
-    
+
     models_query = (
         select(models.Models)
         .options(
@@ -2181,12 +2219,12 @@ async def get_grouped_phones_in_stock(db: AsyncSession):
     )
     models_result = await db.execute(models_query)
     models_map = {m.id: m for m in models_result.scalars().all()}
-    
+
     final_result = []
     for model_id, quantity, model_numbers in grouped_phones:
         model_obj = models_map.get(model_id)
         if model_obj:
-            final_result.append({"model": model_obj, "quantity": quantity, "model_numbers": model_numbers})
+            final_result.append({"model": model_obj, "quantity": quantity, "model_numbers": model_numbers or []}) # Добавил or []
 
     return final_result
 
@@ -3520,14 +3558,14 @@ async def get_margin_analytics(db: AsyncSession, start_date: date, end_date: dat
 async def get_sell_through_analytics(db: AsyncSession, start_date: date, end_date: date) -> dict:
     """
     Рассчитывает коэффициент реализации (Sell-Through Rate) за период.
+    Использует логику на основе последнего статуса телефона в логах.
     """
     end_date_inclusive = end_date + timedelta(days=1)
 
-    # 1. Считаем, сколько было продано телефонов за период
+    # 1. Считаем проданные за период (без изменений)
     sold_query = (
-        select(func.sum(models.SaleDetails.quantity))
-        .join(models.Sales)
-        .join(models.Warehouse)
+        select(func.count(models.SaleDetails.id))
+        .join(models.Sales).join(models.Warehouse)
         .where(
             models.Warehouse.product_type_id == 1,
             models.Sales.sale_date >= start_date,
@@ -3536,27 +3574,52 @@ async def get_sell_through_analytics(db: AsyncSession, start_date: date, end_dat
     )
     sold_count = (await db.execute(sold_query)).scalar_one_or_none() or 0
 
-    # 2. Считаем, сколько телефонов поступило за период
+    # 2. Считаем поступившие за период (без изменений)
     received_query = select(func.count(models.Phones.id)).where(
         models.Phones.added_date >= start_date,
         models.Phones.added_date <= end_date
     )
     received_count = (await db.execute(received_query)).scalar_one_or_none() or 0
 
-    # 3. Считаем, какой был сток на начало периода
-    # Это телефоны, которые поступили до начала периода и не были проданы до его начала.
-    initial_stock_subquery = (
-        select(models.Phones.id)
-        .outerjoin(models.Warehouse, (models.Phones.id == models.Warehouse.product_id) & (models.Warehouse.product_type_id == 1))
-        .outerjoin(models.SaleDetails, models.Warehouse.id == models.SaleDetails.warehouse_id)
-        .outerjoin(models.Sales, models.SaleDetails.sale_id == models.Sales.id)
-        .where(models.Phones.added_date < start_date)
-        .group_by(models.Phones.id)
-        .having(or_(func.max(models.Sales.sale_date) >= start_date, func.max(models.Sales.sale_date).is_(None)))
-    )
-    initial_stock_count = (await db.execute(select(func.count()).select_from(initial_stock_subquery.subquery()))).scalar_one()
+    # --- VVV НАЧАЛО ИСПРАВЛЕНИЙ VVV ---
 
-    # 4. Рассчитываем итоговые показатели
+    # 3. Считаем начальный сток
+    
+    # Подзапрос: находим ID последнего лога для каждого телефона до начала периода
+    last_log_subquery = (
+        select(
+            models.PhoneMovementLog.phone_id,
+            func.max(models.PhoneMovementLog.id).label("last_log_id")
+        )
+        .where(models.PhoneMovementLog.timestamp < start_date)
+        .group_by(models.PhoneMovementLog.phone_id)
+    ).subquery()
+
+    # Список статусов, означающих, что телефон находится ВО ВЛАДЕНИИ компании
+    # (на складе, на инспекции, в ремонте, у поставщика и т.д.)
+    we_own_it_events = [
+        models.PhoneEventType.ПОСТУПЛЕНИЕ_ОТ_ПОСТАВЩИКА, # <- Главное исправление
+        models.PhoneEventType.ПРИНЯТ_НА_СКЛАД,
+        models.PhoneEventType.ВОЗВРАТ_ОТ_КЛИЕНТА,
+        models.PhoneEventType.ПОЛУЧЕН_ОТ_ПОСТАВЩИКА,
+        models.PhoneEventType.ПОЛУЧЕН_ИЗ_РЕМОНТА,
+        models.PhoneEventType.ОТМЕНА_ПРОДАЖИ,
+        models.PhoneEventType.ПРИНЯТ_ИЗ_ПОДМЕНЫ,
+        models.PhoneEventType.ОТПРАВЛЕН_ПОСТАВЩИКУ,
+        models.PhoneEventType.ОТПРАВЛЕН_В_РЕМОНТ,
+    ]
+    
+    # Считаем, сколько телефонов имели один из этих статусов на начало периода
+    initial_stock_query = (
+        select(func.count())
+        .select_from(models.PhoneMovementLog)
+        .join(last_log_subquery, models.PhoneMovementLog.id == last_log_subquery.c.last_log_id)
+        .where(models.PhoneMovementLog.event_type.in_(we_own_it_events))
+    )
+    initial_stock_count = (await db.execute(initial_stock_query)).scalar_one() or 0
+    
+    # --- ^^^ КОНЕЦ ИСПРАВЛЕНИЙ ^^^ ---
+
     total_available = initial_stock_count + received_count
     sell_through_rate = (sold_count / total_available * 100) if total_available > 0 else 0
 
@@ -4234,3 +4297,47 @@ async def update_supplier_order_with_sdek_info(
     )
     await db.execute(stmt)
     await db.commit()
+
+async def get_expense_breakdown_report(db: AsyncSession, start_date: date, end_date: date) -> dict:
+    """Собирает детализацию расходов по категориям за период."""
+    end_date_inclusive = end_date + timedelta(days=1)
+
+    # Запрос для группировки расходов по категориям
+    query = (
+        select(
+            models.OperationCategories.name,
+            func.sum(models.CashFlow.amount).label("total_amount")
+        )
+        .join(models.OperationCategories)
+        .filter(
+            models.CashFlow.date >= start_date,
+            models.CashFlow.date < end_date_inclusive,
+            models.OperationCategories.type == 'expense',
+            models.OperationCategories.view != 'Техническая операция',
+            models.OperationCategories.name != 'Закупка товара'
+        )
+        .group_by(models.OperationCategories.name)
+        .order_by(func.sum(models.CashFlow.amount).asc()) # Сортируем от самых больших расходов
+    )
+    
+    result = await db.execute(query)
+    breakdown_data = result.mappings().all()
+
+    # Преобразуем данные и считаем итоговую сумму
+    total_expenses = Decimal('0')
+    breakdown_list = []
+    for row in breakdown_data:
+        amount = abs(row['total_amount'] or Decimal('0')) # Берем модуль, т.к. расходы отрицательные
+        total_expenses += amount
+        breakdown_list.append({
+            "category_name": row['name'],
+            "total_amount": amount
+        })
+
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "total_expenses": total_expenses,
+        "breakdown": breakdown_list
+    }
+

@@ -2815,6 +2815,19 @@ async def read_company_health_analytics(db: AsyncSession = Depends(get_db)):
     return await crud.get_company_health_analytics(db=db)
 
 
+@app.get("/api/v1/reports/expense-breakdown", 
+         response_model=schemas.ExpenseBreakdownReport,
+         tags=["Reports"],
+         dependencies=[Depends(security.require_permission("view_reports"))])
+async def read_expense_breakdown_report(
+    start_date: date,
+    end_date: date,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает детализацию расходов по категориям за период."""
+    return await crud.get_expense_breakdown_report(db=db, start_date=start_date, end_date=end_date)
+
+
 @app.post("/api/v1/waiting-list", response_model=schemas.WaitingListCreateResponse, tags=["Waiting List"],
           dependencies=[Depends(security.require_permission("perform_sales"))])
 async def add_to_waiting_list(

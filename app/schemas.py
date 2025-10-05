@@ -1087,3 +1087,14 @@ class SdekReturnOrderRequest(BaseModel):
     recipient_phone: str
     to_location_address: str
     declared_value: Decimal
+
+class ExpenseBreakdownItem(BaseModel):
+    category_name: str
+    total_amount: Decimal
+
+class ExpenseBreakdownReport(BaseModel):
+    start_date: date
+    end_date: date
+    total_expenses: Decimal
+    breakdown: List[ExpenseBreakdownItem]
+
